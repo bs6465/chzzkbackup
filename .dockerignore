@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.git/
+
+data/
+temp/
+
+Chzzk-Rekoda-main/
+채팅 히스토리 프로그램/

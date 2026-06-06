@@ -1,0 +1,72 @@
+<section class="grid">
+  <div class="panel">
+    <h2>녹화 중</h2>
+    <div class="list">
+      {% for session in active_sessions %}
+      <div class="row">
+        <div>
+          <strong>{{ session.channel_name }}</strong>
+          <span>{{ session.live_title }}</span>
+          <span>{{ session.started_at }}</span>
+        </div>
+        <form method="post" action="/recordings/{{ session.id }}/stop">
+          <button class="danger" type="submit">중지</button>
+        </form>
+      </div>
+      {% else %}
+      <p class="muted">현재 녹화 중인 방송이 없습니다.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>인코딩 큐</h2>
+    <div class="list compact">
+      {% for job in encode_jobs %}
+      <div class="row">
+        <div>
+          <strong>#{{ job.id }} {{ job.status }}</strong>
+          <span>{{ job.final_path }}</span>
+          {% if job.error %}<span class="error">{{ job.error }}</span>{% endif %}
+        </div>
+      </div>
+      {% else %}
+      <p class="muted">인코딩 작업이 없습니다.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>디스크</h2>
+    <div class="metrics">
+      <div class="{{ 'warn' if temp_disk.warn else '' }}">
+        <strong>Temp</strong>
+        <span>{{ temp_disk.free|bytes }} free</span>
+        <small>{{ temp_disk.path }}</small>
+      </div>
+      <div class="{{ 'warn' if final_disk.warn else '' }}">
+        <strong>Final</strong>
+        <span>{{ final_disk.free|bytes }} free</span>
+        <small>{{ final_disk.path }}</small>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>최근 세션</h2>
+    <div class="list compact">
+      {% for session in recent_sessions %}
+      <div class="row">
+        <div>
+          <strong>{{ session.channel_name }} · {{ session.status }}</strong>
+          <span>{{ session.live_title }}</span>
+          {% if session.final_path %}<span>{{ session.final_path }}</span>{% endif %}
+          {% if session.error %}<span class="error">{{ session.error }}</span>{% endif %}
+        </div>
+      </div>
+      {% else %}
+      <p class="muted">세션 이력이 없습니다.</p>
+      {% endfor %}
+    </div>
+  </div>
+</section>

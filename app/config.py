@@ -1,0 +1,23 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+APP_DATA_DIR = Path(os.getenv("APP_DATA_DIR", "./data")).resolve()
+TEMP_DIR = Path(os.getenv("TEMP_DIR", "./temp")).resolve()
+FINAL_ROOT = Path(os.getenv("FINAL_ROOT", "/data/chzzk_backup")).resolve()
+DB_PATH = APP_DATA_DIR / "chzzkbackup.sqlite3"
+
+POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "30"))
+UI_STATUS_INTERVAL_SECONDS = 3
+UI_LOG_INTERVAL_SECONDS = 5
+DISK_WARN_BYTES = int(os.getenv("DISK_WARN_BYTES", str(100 * 1024**3)))
+LOG_RETENTION_DAYS = 30
+FAILED_TEMP_RETENTION_DAYS = 7
+
+LIVE_DETAIL_API = "https://api.chzzk.naver.com/service/v3/channels/{channel_id}/live-detail"
+CHANNEL_API = "https://api.chzzk.naver.com/service/v1/channels/{channel_id}"
+
+STREAMLINK_PLUGIN_DIR = Path(__file__).resolve().parent / "plugin"
+

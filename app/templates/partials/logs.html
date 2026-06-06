@@ -1,0 +1,14 @@
+<section class="panel logs">
+  <h2>로그</h2>
+  <div class="log-list">
+    {% for log in logs %}
+    <div class="log {{ log.level|lower }}">
+      <span>{{ log.created_at }}</span>
+      <strong>{{ log.level }}</strong>
+      <p>{{ log.message }}</p>
+    </div>
+    {% else %}
+    <p class="muted">로그가 없습니다.</p>
+    {% endfor %}
+  </div>
+</section>

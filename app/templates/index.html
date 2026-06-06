@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="grid">
+  <div class="panel">
+    <h2>채널</h2>
+    <form class="inline-form" method="post" action="/channels">
+      <input name="channel_id" placeholder="unique ID" required pattern="[A-Za-z0-9_-]{1,128}">
+      <button type="submit">추가</button>
+    </form>
+    <div class="list">
+      {% for channel in channels %}
+      <div class="row">
+        <div>
+          <strong>{{ channel.name }}</strong>
+          <span>{{ channel.id }}</span>
+        </div>
+        <form method="post" action="/channels/{{ channel.id }}/rename" class="rename">
+          <input name="name" value="{{ channel.name }}">
+          <button type="submit">이름</button>
+        </form>
+        <form method="post" action="/channels/{{ channel.id }}/toggle">
+          <button type="submit">{{ "끄기" if channel.active else "켜기" }}</button>
+        </form>
+        <form method="post" action="/channels/{{ channel.id }}/delete">
+          <button class="danger" type="submit">삭제</button>
+        </form>
+      </div>
+      {% else %}
+      <p class="muted">등록된 채널이 없습니다.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>토큰</h2>
+    <form method="post" action="/tokens" class="stack">
+      <label>NID_SES <input name="nid_ses" type="password" placeholder="{{ tokens_masked.NID_SES or 'not set' }}"></label>
+      <label>NID_AUT <input name="nid_aut" type="password" placeholder="{{ tokens_masked.NID_AUT or 'not set' }}"></label>
+      <button type="submit">저장</button>
+    </form>
+    <form method="post" action="/tokens/test" class="inline-form">
+      <input name="channel_id" placeholder="테스트 채널 ID(선택)">
+      <button type="submit">테스트</button>
+    </form>
+  </div>
+</section>
+
+<div id="status" hx-get="/partials/status" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "partials/status.html" %}
+</div>
+
+<div id="logs" hx-get="/partials/logs" hx-trigger="every 5s" hx-swap="innerHTML">
+  {% include "partials/logs.html" %}
+</div>
+{% endblock %}
