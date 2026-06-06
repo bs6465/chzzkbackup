@@ -4,6 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>ChzzkBackup</title>
+    <script>
+      (() => {
+        const key = "chzzkbackup-theme";
+        const stored = localStorage.getItem(key);
+        const prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = stored || (prefersDark ? "dark" : "light");
+      })();
+    </script>
     <link rel="stylesheet" href="/static/styles.css">
     <script src="https://unpkg.com/htmx.org@2.0.4"></script>
   </head>
@@ -11,12 +19,30 @@
     <header class="topbar">
       <div>
         <h1>ChzzkBackup</h1>
-        <p>0.1.1 · local dashboard</p>
+        <p>0.1.2 · local dashboard</p>
       </div>
-      <div class="endpoint">0.0.0.0:8733</div>
+      <div class="topbar-actions">
+        <div class="endpoint">0.0.0.0:8733</div>
+        <button type="button" id="theme-toggle" class="theme-toggle">다크</button>
+      </div>
     </header>
     <main>
       {% block content %}{% endblock %}
     </main>
+    <script>
+      (() => {
+        const key = "chzzkbackup-theme";
+        const button = document.getElementById("theme-toggle");
+        const applyTheme = (theme) => {
+          document.documentElement.dataset.theme = theme;
+          localStorage.setItem(key, theme);
+          button.textContent = theme === "dark" ? "라이트" : "다크";
+        };
+        button.addEventListener("click", () => {
+          applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+        });
+        applyTheme(document.documentElement.dataset.theme || "light");
+      })();
+    </script>
   </body>
 </html>

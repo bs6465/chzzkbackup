@@ -13,6 +13,11 @@ from streamlink.stream.hls import HLSStream, HLSStreamReader, HLSStreamWorker, p
 log = logging.getLogger(__name__)
 
 
+def should_refresh_stream_error(err: StreamError) -> bool:
+    response = getattr(err, "response", None)
+    return response is not None and getattr(response, "status_code", 0) >= 400
+
+
 class ChzzkHLSStreamWorker(HLSStreamWorker):
     stream: "ChzzkHLSStream"
 
@@ -21,7 +26,7 @@ class ChzzkHLSStreamWorker(HLSStreamWorker):
             try:
                 return super()._fetch_playlist()
             except StreamError as err:
-                if err.response is not None and err.response.status_code >= 400:
+                if should_refresh_stream_error(err):
                     self.stream.refresh_playlist()
                     log.debug("Force-refreshed Chzzk playlist token")
                 else:

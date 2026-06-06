@@ -293,9 +293,25 @@ class Database:
     def recent_logs(self, limit: int = 80) -> list[dict[str, Any]]:
         return self.query_all("SELECT * FROM app_logs ORDER BY id DESC LIMIT ?", (limit,))
 
-    def cleanup_old_logs(self, days: int = config.LOG_RETENTION_DAYS) -> None:
+    def cleanup_old_logs(
+        self,
+        days: int = config.LOG_RETENTION_DAYS,
+        max_rows: int = config.LOG_RETENTION_MAX_ROWS,
+    ) -> None:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         self.execute("DELETE FROM app_logs WHERE created_at < ?", (cutoff.isoformat(),))
+        if max_rows > 0:
+            self.execute(
+                """
+                DELETE FROM app_logs
+                WHERE id NOT IN (
+                  SELECT id FROM app_logs
+                  ORDER BY id DESC
+                  LIMIT ?
+                )
+                """,
+                (max_rows,),
+            )
 
 
 db = Database()

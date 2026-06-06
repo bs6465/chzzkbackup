@@ -35,7 +35,12 @@ def recording_name(started_at: datetime, streamer: str, title: str, suffix: str)
     return shorten_filename(f"[{stamp}] {safe_streamer} - {safe_title}{suffix}")
 
 
-async def terminate_process(process: asyncio.subprocess.Process | None, name: str) -> None:
+async def terminate_process(
+    process: asyncio.subprocess.Process | None,
+    name: str,
+    *,
+    warn_on_kill: bool = True,
+) -> None:
     if process is None or process.returncode is not None:
         return
     try:
@@ -45,7 +50,8 @@ async def terminate_process(process: asyncio.subprocess.Process | None, name: st
             process.terminate()
         await asyncio.wait_for(process.wait(), timeout=10)
     except Exception:
-        logger.warning("%s did not stop cleanly; killing it", name)
+        log_func = logger.warning if warn_on_kill else logger.info
+        log_func("%s did not stop cleanly; killing it", name)
         with contextlib.suppress(Exception):
             if os.name != "nt":
                 os.killpg(os.getpgid(process.pid), signal.SIGKILL)
@@ -99,8 +105,8 @@ class RecorderSupervisor:
         self._stop.set()
         for active in list(self.active.values()):
             active.stop_event.set()
-            await terminate_process(active.ffmpeg_process, "ffmpeg")
-            await terminate_process(active.stream_process, "streamlink")
+            await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
+            await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
         for task in self._channel_tasks.values():
             task.cancel()
         if self._channel_tasks:
@@ -113,9 +119,9 @@ class RecorderSupervisor:
         if not active:
             return False
         active.stop_event.set()
-        await terminate_process(active.stream_process, "streamlink")
-        await terminate_process(active.ffmpeg_process, "ffmpeg")
         logger.info("Manual stop requested for session %s", session_id)
+        await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
+        await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
         return True
 
     async def run(self) -> None:
@@ -125,6 +131,11 @@ class RecorderSupervisor:
 
             for channel_id in list(self._channel_tasks):
                 if channel_id not in active_channels:
+                    for active in list(self.active.values()):
+                        if active.channel_id == channel_id:
+                            active.stop_event.set()
+                            await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
+                            await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
                     self._channel_tasks[channel_id].cancel()
                     self._channel_tasks.pop(channel_id, None)
 
@@ -259,8 +270,8 @@ class RecorderSupervisor:
             ]
             done, pending = await asyncio.wait(tasks[3:], return_when=asyncio.FIRST_COMPLETED)
             if tasks[5] in done:
-                await terminate_process(active.stream_process, "streamlink")
-                await terminate_process(active.ffmpeg_process, "ffmpeg")
+                await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
+                await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
             elif tasks[3] in done:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(tasks[4], timeout=30)
@@ -286,9 +297,10 @@ class RecorderSupervisor:
             db.update_session_status(session_id, "failed", error=str(exc))
             logger.exception("Recording failed for %s: %s", channel_name, exc)
         finally:
+            stopped_by_request = stop_event.is_set()
             stop_event.set()
             chat_task.cancel()
             await asyncio.gather(chat_task, return_exceptions=True)
-            await terminate_process(active.ffmpeg_process, "ffmpeg")
-            await terminate_process(active.stream_process, "streamlink")
+            await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=not stopped_by_request)
+            await terminate_process(active.stream_process, "streamlink", warn_on_kill=not stopped_by_request)
             self.active.pop(session_id, None)
