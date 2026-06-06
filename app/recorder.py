@@ -31,8 +31,8 @@ class ActiveRecording:
 def recording_name(started_at: datetime, streamer: str, title: str, suffix: str) -> str:
     safe_streamer = sanitize_name(streamer, "unknown")
     safe_title = sanitize_name(title, "untitled")
-    stamp = started_at.strftime("%Y-%m-%d_%H-%M-%S")
-    return shorten_filename(f"{stamp}_{safe_streamer}_{safe_title}{suffix}")
+    stamp = started_at.strftime("%y%m%d %H-%M-%S")
+    return shorten_filename(f"[{stamp}] {safe_streamer} - {safe_title}{suffix}")
 
 
 async def terminate_process(process: asyncio.subprocess.Process | None, name: str) -> None:
