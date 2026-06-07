@@ -131,12 +131,17 @@ class RecorderSupervisor:
 
             for channel_id in list(self._channel_tasks):
                 if channel_id not in active_channels:
+                    has_active_recording = False
                     for active in list(self.active.values()):
                         if active.channel_id == channel_id:
+                            has_active_recording = True
                             active.stop_event.set()
                             await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
                             await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
-                    self._channel_tasks[channel_id].cancel()
+                    task = self._channel_tasks[channel_id]
+                    if has_active_recording and not task.done():
+                        continue
+                    task.cancel()
                     self._channel_tasks.pop(channel_id, None)
 
             for channel_id, channel in active_channels.items():

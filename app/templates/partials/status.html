@@ -27,6 +27,20 @@
         <div>
           <strong>#{{ job.id }} {{ job.status }}</strong>
           <span>{{ job.final_path }}</span>
+          {% if job.status in ["running", "completed"] %}
+          {% set progress = job.progress_percent or 0 %}
+          <div class="progress-line">
+            <progress max="100" value="{{ "%.1f"|format(progress) }}"></progress>
+            <span>{{ "%.1f"|format(progress) }}%</span>
+          </div>
+          {% endif %}
+          {% if job.status == "running" %}
+          <span>
+            {{ job.encoded_seconds|duration }} / {{ job.duration_seconds|duration }}
+            · {{ job.speed or "속도 계산 중" }}
+            {% if job.eta_seconds is not none %}· 남은 {{ job.eta_seconds|duration }}{% endif %}
+          </span>
+          {% endif %}
           {% if job.error %}<span class="error">{{ job.error }}</span>{% endif %}
         </div>
       </div>

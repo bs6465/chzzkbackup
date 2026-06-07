@@ -20,12 +20,16 @@ from .utils import (
     disk_status,
     ensure_storage_dirs,
     format_bytes,
+    format_duration,
+    kst_display,
     mask_secret,
     sanitize_name,
 )
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
 templates.env.filters["bytes"] = format_bytes
+templates.env.filters["duration"] = format_duration
+templates.env.filters["kst_datetime"] = kst_display
 
 recorder = RecorderSupervisor()
 encoder = EncodeWorker()
@@ -37,6 +41,12 @@ async def lifespan(_: FastAPI):
     config.APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     config.TEMP_DIR.mkdir(parents=True, exist_ok=True)
     config.FINAL_ROOT.mkdir(parents=True, exist_ok=True)
+    recovered_sessions = db.recover_interrupted_sessions()
+    recovered_jobs = db.recover_interrupted_encode_jobs()
+    if any(recovered_sessions.values()):
+        logger.warning("Recovered interrupted recording session(s): %s", recovered_sessions)
+    if any(recovered_jobs.values()):
+        logger.warning("Recovered interrupted encode job(s): %s", recovered_jobs)
     recorder.start()
     encoder.start()
     maintenance.start()

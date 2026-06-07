@@ -30,6 +30,19 @@ def kst_iso(dt: datetime | None = None) -> str:
     return (dt or now_kst()).astimezone(KST).isoformat(timespec="seconds")
 
 
+def kst_display(value: Any) -> str:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return str(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(KST).isoformat(timespec="seconds")
+
+
 def sanitize_cookie_value(value: Any) -> str:
     text = CONTROL_CHARS_REMOVER.sub("", str(value or ""))
     return text.replace(";", "").strip()
@@ -102,3 +115,17 @@ def format_bytes(size: int | float) -> str:
             return f"{value:.1f} {unit}"
         value /= 1024
     return f"{value:.1f} TB"
+
+
+def format_duration(seconds: Any) -> str:
+    try:
+        value = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return "-"
+    if value < 0:
+        return "-"
+    hours, remainder = divmod(value, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"

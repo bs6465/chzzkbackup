@@ -3,7 +3,7 @@
   <div class="log-list">
     {% for log in logs %}
     <div class="log {{ log.level|lower }}">
-      <span>{{ log.created_at }}</span>
+      <span>{{ log.created_at|kst_datetime }}</span>
       <strong>{{ log.level }}</strong>
       <p>{{ log.message }}</p>
     </div>

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
-from .utils import sanitize_cookie_value, utc_now_iso
+from .utils import sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
 
 
 class Database:
@@ -68,6 +68,12 @@ class Database:
                   created_at TEXT NOT NULL,
                   started_at TEXT,
                   finished_at TEXT,
+                  duration_seconds REAL,
+                  encoded_seconds REAL DEFAULT 0,
+                  progress_percent REAL DEFAULT 0,
+                  speed TEXT,
+                  eta_seconds REAL,
+                  progress_updated_at TEXT,
                   FOREIGN KEY(session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE
                 );
 
@@ -79,7 +85,27 @@ class Database:
                 );
                 """
             )
+            self._ensure_columns(
+                "encode_jobs",
+                {
+                    "duration_seconds": "REAL",
+                    "encoded_seconds": "REAL DEFAULT 0",
+                    "progress_percent": "REAL DEFAULT 0",
+                    "speed": "TEXT",
+                    "eta_seconds": "REAL",
+                    "progress_updated_at": "TEXT",
+                },
+            )
             self._chmod_private()
+
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
+        existing = {
+            str(row["name"])
+            for row in self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
 
     def _chmod_private(self) -> None:
         try:
@@ -258,17 +284,143 @@ class Database:
     def update_encode_job(self, job_id: int, status: str, error: str | None = None) -> None:
         fields = ["status = ?"]
         params: list[Any] = [status]
+        now = utc_now_iso()
         if status == "running":
             fields.append("started_at = ?")
-            params.append(utc_now_iso())
+            params.append(now)
+            fields.extend(
+                [
+                    "finished_at = NULL",
+                    "error = NULL",
+                    "duration_seconds = NULL",
+                    "encoded_seconds = 0",
+                    "progress_percent = 0",
+                    "speed = NULL",
+                    "eta_seconds = NULL",
+                    "progress_updated_at = ?",
+                ]
+            )
+            params.append(now)
         if status in {"completed", "failed"}:
             fields.append("finished_at = ?")
-            params.append(utc_now_iso())
+            params.append(now)
+        if status == "completed":
+            fields.extend(
+                [
+                    "encoded_seconds = COALESCE(duration_seconds, encoded_seconds)",
+                    "progress_percent = 100",
+                    "eta_seconds = 0",
+                    "progress_updated_at = ?",
+                ]
+            )
+            params.append(now)
         if error:
             fields.append("error = ?")
             params.append(error)
         params.append(job_id)
         self.execute(f"UPDATE encode_jobs SET {', '.join(fields)} WHERE id = ?", tuple(params))
+
+    def update_encode_progress(
+        self,
+        job_id: int,
+        *,
+        duration_seconds: float | None,
+        encoded_seconds: float | None,
+        progress_percent: float | None,
+        speed: str | None,
+        eta_seconds: float | None,
+    ) -> None:
+        self.execute(
+            """
+            UPDATE encode_jobs
+            SET duration_seconds = COALESCE(?, duration_seconds),
+                encoded_seconds = COALESCE(?, encoded_seconds),
+                progress_percent = COALESCE(?, progress_percent),
+                speed = COALESCE(?, speed),
+                eta_seconds = ?,
+                progress_updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                duration_seconds,
+                encoded_seconds,
+                progress_percent,
+                speed,
+                eta_seconds,
+                utc_now_iso(),
+                job_id,
+            ),
+        )
+
+    def requeue_encode_job(self, job_id: int, session_id: int) -> None:
+        self.execute(
+            """
+            UPDATE encode_jobs
+            SET status = 'queued',
+                started_at = NULL,
+                finished_at = NULL,
+                error = NULL,
+                duration_seconds = NULL,
+                encoded_seconds = 0,
+                progress_percent = 0,
+                speed = NULL,
+                eta_seconds = NULL,
+                progress_updated_at = NULL
+            WHERE id = ?
+            """,
+            (job_id,),
+        )
+        self.update_session_status(session_id, "queued")
+
+    def recover_interrupted_sessions(self) -> dict[str, int]:
+        recovered = {"queued": 0, "failed": 0}
+        rows = self.query_all("SELECT * FROM recording_sessions WHERE status = 'recording'")
+        now = utc_now_iso()
+        for row in rows:
+            session_id = int(row["id"])
+            temp_path = Path(row["temp_path"])
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                source_path = unique_path(temp_path.with_suffix(""))
+                temp_path.replace(source_path)
+                video_dir = config.FINAL_ROOT / sanitize_name(row["channel_name"], "unknown")
+                video_dir.mkdir(parents=True, exist_ok=True)
+                final_path = unique_path(video_dir / f"{source_path.stem}.mp4")
+                self.finish_session(session_id, source_path, "queued")
+                self.add_encode_job(session_id, source_path, final_path)
+                recovered["queued"] += 1
+            else:
+                self.execute(
+                    """
+                    UPDATE recording_sessions
+                    SET status = 'failed', ended_at = ?, error = ?
+                    WHERE id = ?
+                    """,
+                    (now, "Recording was interrupted by application restart", session_id),
+                )
+                recovered["failed"] += 1
+        return recovered
+
+    def recover_interrupted_encode_jobs(self) -> dict[str, int]:
+        recovered = {"queued": 0, "completed": 0, "failed": 0}
+        rows = self.query_all("SELECT * FROM encode_jobs WHERE status = 'running'")
+        for row in rows:
+            job_id = int(row["id"])
+            session_id = int(row["session_id"])
+            source_path = Path(row["source_path"])
+            final_path = Path(row["final_path"])
+            if source_path.exists():
+                self.requeue_encode_job(job_id, session_id)
+                recovered["queued"] += 1
+            elif final_path.exists() and final_path.stat().st_size > 0:
+                self.update_encode_job(job_id, "completed")
+                self.update_session_status(session_id, "completed", final_path=final_path)
+                recovered["completed"] += 1
+            else:
+                error = "Encoding was interrupted by application restart and source file is missing"
+                self.update_encode_job(job_id, "failed", error)
+                self.update_session_status(session_id, "failed", error=error)
+                recovered["failed"] += 1
+        return recovered
 
     def active_sessions(self) -> list[dict[str, Any]]:
         return self.query_all(
