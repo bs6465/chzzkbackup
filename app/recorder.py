@@ -187,8 +187,10 @@ class RecorderSupervisor:
         temp_path = unique_path(config.TEMP_DIR / f"{base}.ts.part")
         source_path = temp_path.with_suffix("")
         final_path = unique_path(video_dir / f"{base}.mp4")
-        chat_jsonl_path = unique_path(chat_dir / f"{base}.jsonl")
-        chat_csv_path = unique_path(chat_jsonl_path.with_suffix(".csv"))
+        chat_jsonl_temp_path = unique_path(config.TEMP_DIR / f"{base}.chat.jsonl.part")
+        chat_csv_temp_path = unique_path(config.TEMP_DIR / f"{base}.chat.csv.part")
+        chat_jsonl_path = chat_dir / f"{base}.jsonl"
+        chat_csv_path = chat_dir / f"{base}.csv"
 
         session_id = db.create_session(
             channel_id,
@@ -199,13 +201,15 @@ class RecorderSupervisor:
             temp_path,
             chat_jsonl_path,
             chat_csv_path,
+            chat_jsonl_temp_path,
+            chat_csv_temp_path,
         )
         stop_event = asyncio.Event()
         active = ActiveRecording(session_id, channel_id, channel_name, stop_event)
         self.active[session_id] = active
         logger.info("Recording started for %s: %s", channel_name, live_title)
 
-        chat_capture = ChatCapture(channel_id, tokens, chat_jsonl_path, chat_csv_path, started_at)
+        chat_capture = ChatCapture(channel_id, tokens, chat_jsonl_temp_path, chat_csv_temp_path, started_at)
         chat_task = asyncio.create_task(chat_capture.run(stop_event.is_set))
 
         streamlink = shutil.which("streamlink")
@@ -306,6 +310,12 @@ class RecorderSupervisor:
             stop_event.set()
             chat_task.cancel()
             await asyncio.gather(chat_task, return_exceptions=True)
+            try:
+                moved = db.finalize_session_chat_files(session_id)
+                if moved["jsonl"] or moved["csv"]:
+                    logger.info("Chat files finalized for session %s", session_id)
+            except Exception as exc:
+                logger.warning("Chat file finalization failed for session %s: %s", session_id, exc)
             await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=not stopped_by_request)
             await terminate_process(active.stream_process, "streamlink", warn_on_kill=not stopped_by_request)
             self.active.pop(session_id, None)

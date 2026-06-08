@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -57,3 +58,21 @@ async def test_chat_capture_reconnects_after_client_returns(tmp_path):
     assert len(instances) == 2
     assert [instance.kwargs["auto_reconnect"] for instance in instances] == [False, False]
     assert (tmp_path / "chat.jsonl").read_text(encoding="utf-8").count("\n") == 2
+
+
+@pytest.mark.asyncio
+async def test_chat_capture_handles_none_profile(tmp_path):
+    started_at = datetime(2026, 6, 7, 18, 55, 26, tzinfo=ZoneInfo("Asia/Seoul"))
+    capture = ChatCapture(
+        "channel-1",
+        {"NID_AUT": "aut", "NID_SES": "ses"},
+        tmp_path / "chat.jsonl",
+        tmp_path / "chat.csv",
+        started_at,
+    )
+
+    await capture._write_event("chat", {"profile": None, "content": "hello"})
+
+    row = json.loads((tmp_path / "chat.jsonl").read_text(encoding="utf-8"))
+    assert row["nickname"] == ""
+    assert row["content"] == "hello"

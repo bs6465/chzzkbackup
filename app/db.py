@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 import threading
 from datetime import datetime, timedelta, timezone
@@ -52,6 +53,8 @@ class Database:
                   temp_path TEXT,
                   source_path TEXT,
                   final_path TEXT,
+                  chat_jsonl_temp_path TEXT,
+                  chat_csv_temp_path TEXT,
                   chat_jsonl_path TEXT,
                   chat_csv_path TEXT,
                   error TEXT,
@@ -94,6 +97,13 @@ class Database:
                     "speed": "TEXT",
                     "eta_seconds": "REAL",
                     "progress_updated_at": "TEXT",
+                },
+            )
+            self._ensure_columns(
+                "recording_sessions",
+                {
+                    "chat_jsonl_temp_path": "TEXT",
+                    "chat_csv_temp_path": "TEXT",
                 },
             )
             self._chmod_private()
@@ -219,12 +229,26 @@ class Database:
         temp_path: Path,
         chat_jsonl_path: Path,
         chat_csv_path: Path,
+        chat_jsonl_temp_path: Path | None = None,
+        chat_csv_temp_path: Path | None = None,
     ) -> int:
         cur = self.execute(
             """
             INSERT INTO recording_sessions
-            (channel_id, channel_name, live_id, live_title, started_at, status, temp_path, chat_jsonl_path, chat_csv_path)
-            VALUES (?, ?, ?, ?, ?, 'recording', ?, ?, ?)
+            (
+              channel_id,
+              channel_name,
+              live_id,
+              live_title,
+              started_at,
+              status,
+              temp_path,
+              chat_jsonl_temp_path,
+              chat_csv_temp_path,
+              chat_jsonl_path,
+              chat_csv_path
+            )
+            VALUES (?, ?, ?, ?, ?, 'recording', ?, ?, ?, ?, ?)
             """,
             (
                 channel_id,
@@ -233,11 +257,62 @@ class Database:
                 live_title,
                 started_at,
                 str(temp_path),
+                str(chat_jsonl_temp_path or chat_jsonl_path),
+                str(chat_csv_temp_path or chat_csv_path),
                 str(chat_jsonl_path),
                 str(chat_csv_path),
             ),
         )
         return int(cur.lastrowid)
+
+    def finalize_session_chat_files(self, session_id: int) -> dict[str, Path | None]:
+        row = self.query_one("SELECT * FROM recording_sessions WHERE id = ?", (session_id,))
+        if not row:
+            return {"jsonl": None, "csv": None}
+        moved = {
+            "jsonl": self._finalize_chat_file(row, "chat_jsonl_temp_path", "chat_jsonl_path"),
+            "csv": self._finalize_chat_file(row, "chat_csv_temp_path", "chat_csv_path"),
+        }
+        updates = []
+        params: list[Any] = []
+        if moved["jsonl"]:
+            updates.append("chat_jsonl_path = ?")
+            params.append(str(moved["jsonl"]))
+        if moved["csv"]:
+            updates.append("chat_csv_path = ?")
+            params.append(str(moved["csv"]))
+        if updates:
+            params.append(session_id)
+            self.execute(f"UPDATE recording_sessions SET {', '.join(updates)} WHERE id = ?", tuple(params))
+        return moved
+
+    def _finalize_chat_file(self, row: dict[str, Any], temp_key: str, final_key: str) -> Path | None:
+        temp_value = row.get(temp_key)
+        final_value = row.get(final_key)
+        if not temp_value or not final_value:
+            return None
+        temp_path = Path(temp_value)
+        final_path = Path(final_value)
+        if not temp_path.exists():
+            return None
+        if not self._chat_file_has_payload(temp_path, final_path):
+            temp_path.unlink(missing_ok=True)
+            return None
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        destination = final_path if temp_path == final_path else unique_path(final_path)
+        if temp_path != destination:
+            shutil.move(str(temp_path), str(destination))
+        return destination
+
+    def _chat_file_has_payload(self, temp_path: Path, final_path: Path) -> bool:
+        if temp_path.stat().st_size == 0:
+            return False
+        if final_path.suffix.lower() != ".csv":
+            with temp_path.open("r", encoding="utf-8", errors="ignore") as handle:
+                return any(line.strip() for line in handle)
+        with temp_path.open("r", encoding="utf-8-sig", errors="ignore") as handle:
+            non_empty_lines = sum(1 for line in handle if line.strip())
+        return non_empty_lines > 1
 
     def finish_session(self, session_id: int, source_path: Path | None, status: str = "queued") -> None:
         self.execute(
@@ -379,6 +454,7 @@ class Database:
         for row in rows:
             session_id = int(row["id"])
             temp_path = Path(row["temp_path"])
+            self.finalize_session_chat_files(session_id)
             if temp_path.exists() and temp_path.stat().st_size > 0:
                 source_path = unique_path(temp_path.with_suffix(""))
                 temp_path.replace(source_path)

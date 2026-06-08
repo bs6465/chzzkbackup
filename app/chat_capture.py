@@ -29,6 +29,7 @@ class ChatCapture:
         self.csv_path = csv_path
         self.recording_started_at = recording_started_at
         self.client_factory = client_factory
+        self._jsonl_file = None
         self._csv_file = None
         self._csv_writer: csv.DictWriter[str] | None = None
 
@@ -36,18 +37,27 @@ class ChatCapture:
         ts = now_kst()
         offset = max(0.0, (ts - self.recording_started_at).total_seconds())
         payload = self._message_to_dict(message)
+        profile = payload.get("profile")
+        if not isinstance(profile, dict):
+            profile = {}
         row = {
             "type": event_type,
             "timestamp": kst_iso(ts),
             "offset_seconds": round(offset, 3),
-            "nickname": payload.get("nickname") or payload.get("profile", {}).get("nickname", ""),
+            "nickname": payload.get("nickname") or profile.get("nickname", ""),
             "content": payload.get("content") or payload.get("message") or "",
             "raw": payload,
         }
 
-        self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
-        async with aiofiles.open(self.jsonl_path, "a", encoding="utf-8") as f:
-            await f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        line = json.dumps(row, ensure_ascii=False, default=str) + "\n"
+        if self._jsonl_file:
+            await self._jsonl_file.write(line)
+            await self._jsonl_file.flush()
+        else:
+            self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            async with aiofiles.open(self.jsonl_path, "a", encoding="utf-8") as f:
+                await f.write(line)
+                await f.flush()
 
         if self._csv_writer:
             self._csv_writer.writerow(
@@ -113,47 +123,56 @@ class ChatCapture:
                 return
             client_factory = AsyncUnofficialChatClient
 
+        self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         self.csv_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.csv_path.open("a", encoding="utf-8-sig", newline="") as csv_file:
-            self._csv_file = csv_file
-            self._csv_writer = csv.DictWriter(
-                csv_file,
-                fieldnames=["type", "timestamp", "offset_seconds", "nickname", "content", "raw_json"],
-            )
-            if csv_file.tell() == 0:
-                self._csv_writer.writeheader()
+        try:
+            async with aiofiles.open(self.jsonl_path, "a", encoding="utf-8") as jsonl_file:
+                self._jsonl_file = jsonl_file
+                with self.csv_path.open("a", encoding="utf-8-sig", newline="") as csv_file:
+                    self._csv_file = csv_file
+                    self._csv_writer = csv.DictWriter(
+                        csv_file,
+                        fieldnames=["type", "timestamp", "offset_seconds", "nickname", "content", "raw_json"],
+                    )
+                    if csv_file.tell() == 0:
+                        self._csv_writer.writeheader()
+                        self._csv_file.flush()
 
-            while not stop():
-                client = client_factory(
-                    nid_aut=self.tokens.get("NID_AUT", ""),
-                    nid_ses=self.tokens.get("NID_SES", ""),
-                    auto_reconnect=False,
-                    poll_interval=10.0,
-                )
-                try:
-                    async with client as chat:
-                        for attr, event_type in [
-                            ("on_chat", "chat"),
-                            ("on_donation", "donation"),
-                            ("on_subscription", "subscription"),
-                            ("on_notice", "notice"),
-                            ("on_system", "system"),
-                        ]:
-                            self._bind_handler(chat, attr, event_type)
+                    while not stop():
+                        client = client_factory(
+                            nid_aut=self.tokens.get("NID_AUT", ""),
+                            nid_ses=self.tokens.get("NID_SES", ""),
+                            auto_reconnect=False,
+                            poll_interval=10.0,
+                        )
+                        try:
+                            async with client as chat:
+                                for attr, event_type in [
+                                    ("on_chat", "chat"),
+                                    ("on_donation", "donation"),
+                                    ("on_subscription", "subscription"),
+                                    ("on_notice", "notice"),
+                                    ("on_system", "system"),
+                                ]:
+                                    self._bind_handler(chat, attr, event_type)
 
-                        await chat.connect(self.channel_id)
-                        logger.info("Chat capture connected for %s", self.channel_id)
-                        await chat.run_forever()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    if stop():
-                        break
-                    logger.warning("Chat capture error for %s: %s", self.channel_id, exc)
-                else:
-                    if not stop():
-                        logger.warning("Chat capture disconnected for %s; reconnecting", self.channel_id)
+                                await chat.connect(self.channel_id)
+                                logger.info("Chat capture connected for %s", self.channel_id)
+                                await chat.run_forever()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            if stop():
+                                break
+                            logger.warning("Chat capture error for %s: %s", self.channel_id, exc)
+                        else:
+                            if not stop():
+                                logger.warning("Chat capture disconnected for %s; reconnecting", self.channel_id)
 
-                await self._sleep_until_stop(stop, 5.0)
+                        await self._sleep_until_stop(stop, 5.0)
 
-            logger.info("Chat capture stopped for %s", self.channel_id)
+                    logger.info("Chat capture stopped for %s", self.channel_id)
+        finally:
+            self._jsonl_file = None
+            self._csv_file = None
+            self._csv_writer = None

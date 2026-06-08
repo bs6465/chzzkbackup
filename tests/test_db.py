@@ -57,6 +57,100 @@ def test_recover_interrupted_sessions_marks_recording_failed(tmp_path):
     assert "restart" in session["error"]
 
 
+def test_finalize_session_chat_files_moves_temp_files(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    jsonl_temp = tmp_path / "temp.chat.jsonl.part"
+    csv_temp = tmp_path / "temp.chat.csv.part"
+    jsonl_final = tmp_path / "final" / "chat.jsonl"
+    csv_final = tmp_path / "final" / "chat.csv"
+    jsonl_temp.write_text('{"content":"hello"}\n', encoding="utf-8")
+    csv_temp.write_text("type,content\nchat,hello\n", encoding="utf-8")
+    session_id = database.create_session(
+        "abc123",
+        "Streamer",
+        "live-1",
+        "Title",
+        "2026-06-07T10:00:00+09:00",
+        tmp_path / "recording.ts.part",
+        jsonl_final,
+        csv_final,
+        jsonl_temp,
+        csv_temp,
+    )
+
+    moved = database.finalize_session_chat_files(session_id)
+
+    assert moved == {"jsonl": jsonl_final, "csv": csv_final}
+    assert jsonl_final.read_text(encoding="utf-8") == '{"content":"hello"}\n'
+    assert csv_final.read_text(encoding="utf-8") == "type,content\nchat,hello\n"
+    assert not jsonl_temp.exists()
+    assert not csv_temp.exists()
+
+
+def test_finalize_session_chat_files_uses_unique_destination(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    jsonl_temp = tmp_path / "temp.chat.jsonl.part"
+    csv_temp = tmp_path / "temp.chat.csv.part"
+    jsonl_final = tmp_path / "final" / "chat.jsonl"
+    csv_final = tmp_path / "final" / "chat.csv"
+    jsonl_final.parent.mkdir(parents=True)
+    jsonl_final.write_text("existing\n", encoding="utf-8")
+    csv_final.write_text("existing\n", encoding="utf-8")
+    jsonl_temp.write_text("new\n", encoding="utf-8")
+    csv_temp.write_text("type,content\nchat,new\n", encoding="utf-8")
+    session_id = database.create_session(
+        "abc123",
+        "Streamer",
+        "live-1",
+        "Title",
+        "2026-06-07T10:00:00+09:00",
+        tmp_path / "recording.ts.part",
+        jsonl_final,
+        csv_final,
+        jsonl_temp,
+        csv_temp,
+    )
+
+    moved = database.finalize_session_chat_files(session_id)
+    session = database.query_one("SELECT * FROM recording_sessions WHERE id = ?", (session_id,))
+
+    assert moved["jsonl"] == tmp_path / "final" / "chat_1.jsonl"
+    assert moved["csv"] == tmp_path / "final" / "chat_1.csv"
+    assert session["chat_jsonl_path"] == str(tmp_path / "final" / "chat_1.jsonl")
+    assert session["chat_csv_path"] == str(tmp_path / "final" / "chat_1.csv")
+
+
+def test_finalize_session_chat_files_discards_empty_chat_files(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    jsonl_temp = tmp_path / "temp.chat.jsonl.part"
+    csv_temp = tmp_path / "temp.chat.csv.part"
+    jsonl_temp.write_text("", encoding="utf-8")
+    csv_temp.write_text("type,timestamp,offset_seconds,nickname,content,raw_json\n", encoding="utf-8")
+    session_id = database.create_session(
+        "abc123",
+        "Streamer",
+        "live-1",
+        "Title",
+        "2026-06-07T10:00:00+09:00",
+        tmp_path / "recording.ts.part",
+        tmp_path / "final" / "chat.jsonl",
+        tmp_path / "final" / "chat.csv",
+        jsonl_temp,
+        csv_temp,
+    )
+
+    moved = database.finalize_session_chat_files(session_id)
+
+    assert moved == {"jsonl": None, "csv": None}
+    assert not jsonl_temp.exists()
+    assert not csv_temp.exists()
+    assert not (tmp_path / "final" / "chat.jsonl").exists()
+    assert not (tmp_path / "final" / "chat.csv").exists()
+
+
 def test_recover_interrupted_sessions_queues_existing_temp_file(tmp_path, monkeypatch):
     from app import db as db_module
 
@@ -65,6 +159,10 @@ def test_recover_interrupted_sessions_queues_existing_temp_file(tmp_path, monkey
     temp_path = tmp_path / "recording.ts.part"
     temp_path.write_text("video")
     database.upsert_channel("abc123", "Streamer")
+    chat_jsonl_temp = tmp_path / "chat.jsonl.part"
+    chat_csv_temp = tmp_path / "chat.csv.part"
+    chat_jsonl_temp.write_text('{"content":"chat"}\n', encoding="utf-8")
+    chat_csv_temp.write_text("type,content\nchat,chat\n", encoding="utf-8")
     session_id = database.create_session(
         "abc123",
         "Streamer",
@@ -72,8 +170,10 @@ def test_recover_interrupted_sessions_queues_existing_temp_file(tmp_path, monkey
         "Title",
         "2026-06-07T10:00:00+09:00",
         temp_path,
-        tmp_path / "chat.jsonl",
-        tmp_path / "chat.csv",
+        tmp_path / "final" / "Streamer" / "채팅" / "chat.jsonl",
+        tmp_path / "final" / "Streamer" / "채팅" / "chat.csv",
+        chat_jsonl_temp,
+        chat_csv_temp,
     )
 
     assert database.recover_interrupted_sessions() == {"queued": 1, "failed": 0}
@@ -85,6 +185,8 @@ def test_recover_interrupted_sessions_queues_existing_temp_file(tmp_path, monkey
     assert job["status"] == "queued"
     assert job["source_path"] == str(tmp_path / "recording.ts")
     assert job["final_path"] == str(tmp_path / "final" / "Streamer" / "recording.mp4")
+    assert (tmp_path / "final" / "Streamer" / "채팅" / "chat.jsonl").exists()
+    assert (tmp_path / "final" / "Streamer" / "채팅" / "chat.csv").exists()
 
 
 def test_recover_interrupted_encode_jobs_requeues_when_source_exists(tmp_path):
