@@ -76,3 +76,48 @@ async def test_chat_capture_handles_none_profile(tmp_path):
     row = json.loads((tmp_path / "chat.jsonl").read_text(encoding="utf-8"))
     assert row["nickname"] == ""
     assert row["content"] == "hello"
+    assert row["raw"] == {"profile": None, "content": "hello"}
+
+
+@pytest.mark.asyncio
+async def test_chat_capture_csv_omits_raw_json(tmp_path):
+    started_at = datetime(2026, 6, 7, 18, 55, 26, tzinfo=ZoneInfo("Asia/Seoul"))
+    capture = ChatCapture(
+        "channel-1",
+        {"NID_AUT": "aut", "NID_SES": "ses"},
+        tmp_path / "chat.jsonl",
+        tmp_path / "chat.csv",
+        started_at,
+    )
+
+    class FakeChatClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        def on_chat(self, handler):
+            self.handler = handler
+            return handler
+
+        async def connect(self, channel_id):
+            return None
+
+        async def run_forever(self):
+            await self.handler({"nickname": "user", "content": "hello", "extra": "kept-in-jsonl"})
+
+    stopped = {"value": False}
+
+    class StopAfterOne(FakeChatClient):
+        async def run_forever(self):
+            await super().run_forever()
+            stopped["value"] = True
+
+    capture.client_factory = lambda **_: StopAfterOne()
+    await capture.run(lambda: stopped["value"])
+
+    csv_header = (tmp_path / "chat.csv").read_text(encoding="utf-8-sig").splitlines()[0]
+    jsonl_row = json.loads((tmp_path / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert csv_header == "type,timestamp,offset_seconds,nickname,content"
+    assert jsonl_row["raw"]["extra"] == "kept-in-jsonl"

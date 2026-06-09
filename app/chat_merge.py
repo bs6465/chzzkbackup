@@ -82,15 +82,12 @@ def _read_jsonl_rows(paths: list[ParsedChatFile]) -> list[dict[str, Any]]:
 
 
 def _read_csv_rows(paths: list[ParsedChatFile]) -> tuple[list[str], list[dict[str, str]]]:
-    fieldnames: list[str] = []
+    fieldnames: list[str] = ["type", "timestamp", "offset_seconds", "nickname", "content"]
     rows: list[dict[str, str]] = []
     index = 0
     for item in sorted(paths, key=_file_sort_key):
         with item.path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
-            for name in reader.fieldnames or []:
-                if name not in fieldnames:
-                    fieldnames.append(name)
             for row in reader:
                 row["_merge_index"] = str(index)
                 rows.append(row)
@@ -118,8 +115,6 @@ def _merge_jsonl(files: list[ParsedChatFile], destination: Path) -> None:
 
 def _merge_csv(files: list[ParsedChatFile], destination: Path) -> None:
     fieldnames, rows = _read_csv_rows(files)
-    if not fieldnames:
-        fieldnames = ["type", "timestamp", "offset_seconds", "nickname", "content", "raw_json"]
     temp_path = destination.with_name(f"{destination.name}.merge.tmp")
     with temp_path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames, extrasaction="ignore")

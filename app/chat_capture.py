@@ -67,7 +67,6 @@ class ChatCapture:
                     "offset_seconds": row["offset_seconds"],
                     "nickname": row["nickname"],
                     "content": row["content"],
-                    "raw_json": json.dumps(payload, ensure_ascii=False, default=str),
                 }
             )
             self._csv_file.flush()
@@ -132,7 +131,7 @@ class ChatCapture:
                     self._csv_file = csv_file
                     self._csv_writer = csv.DictWriter(
                         csv_file,
-                        fieldnames=["type", "timestamp", "offset_seconds", "nickname", "content", "raw_json"],
+                        fieldnames=["type", "timestamp", "offset_seconds", "nickname", "content"],
                     )
                     if csv_file.tell() == 0:
                         self._csv_writer.writeheader()

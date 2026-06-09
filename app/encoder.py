@@ -236,6 +236,7 @@ class EncodeWorker:
                 if not final_path.exists() or final_path.stat().st_size == 0:
                     raise RuntimeError("ffmpeg completed but final file is missing or empty")
 
+                final_path = db.finalize_encode_output(job_id, final_path)
                 source_path.unlink(missing_ok=True)
                 db.update_encode_job(job_id, "completed")
                 db.update_session_status(session_id, "completed", final_path=final_path)

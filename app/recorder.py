@@ -15,7 +15,7 @@ from .chzzk_api import get_live_detail, streamlink_header_args
 from .chat_capture import ChatCapture
 from .db import db
 from .logger import logger
-from .utils import ensure_storage_dirs, kst_iso, now_kst, sanitize_name, shorten_filename, unique_path
+from .utils import ensure_storage_dirs, kst_iso, now_kst, recording_name, unique_path
 
 
 @dataclass
@@ -26,13 +26,6 @@ class ActiveRecording:
     stop_event: asyncio.Event
     stream_process: asyncio.subprocess.Process | None = None
     ffmpeg_process: asyncio.subprocess.Process | None = None
-
-
-def recording_name(started_at: datetime, streamer: str, title: str, suffix: str) -> str:
-    safe_streamer = sanitize_name(streamer, "unknown")
-    safe_title = sanitize_name(title, "untitled")
-    stamp = started_at.strftime("%y%m%d %H-%M-%S")
-    return shorten_filename(f"[{stamp}] {safe_streamer} - {safe_title}{suffix}")
 
 
 async def terminate_process(
@@ -203,6 +196,7 @@ class RecorderSupervisor:
             chat_csv_path,
             chat_jsonl_temp_path,
             chat_csv_temp_path,
+            final_path,
         )
         stop_event = asyncio.Event()
         active = ActiveRecording(session_id, channel_id, channel_name, stop_event)
@@ -296,7 +290,9 @@ class RecorderSupervisor:
                 source_path = unique_path(source_path)
                 temp_path.replace(source_path)
                 db.finish_session(session_id, source_path, "queued")
-                db.add_encode_job(session_id, source_path, final_path)
+                session = db.get_session(session_id) or {}
+                target_final_path = Path(session["final_path"]) if session.get("final_path") else final_path
+                db.add_encode_job(session_id, source_path, target_final_path)
                 logger.info("Recording queued for encoding: %s", source_path)
             else:
                 db.finish_session(session_id, None, "failed")

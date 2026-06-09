@@ -167,3 +167,12 @@ async def stop_recording(session_id: int):
     if not stopped:
         raise HTTPException(status_code=404, detail="Active recording not found")
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/recordings/{session_id}/rename")
+async def rename_recording(session_id: int, title: str = Form(...)):
+    session = db.rename_session_title(session_id, title)
+    if not session:
+        raise HTTPException(status_code=404, detail="Recording session not found")
+    logger.info("Recording renamed: session %s -> %s", session_id, session["live_title"])
+    return RedirectResponse("/", status_code=303)

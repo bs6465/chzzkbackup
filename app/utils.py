@@ -76,6 +76,13 @@ def shorten_filename(filename: str) -> str:
     return f"{shortened}_{digest}{suffix}"
 
 
+def recording_name(started_at: datetime, streamer: str, title: str, suffix: str) -> str:
+    safe_streamer = sanitize_name(streamer, "unknown")
+    safe_title = sanitize_name(title, "untitled")
+    stamp = started_at.strftime("%y%m%d %H-%M-%S")
+    return shorten_filename(f"[{stamp}] {safe_streamer} - {safe_title}{suffix}")
+
+
 def unique_path(path: Path) -> Path:
     if not path.exists():
         return path

@@ -44,3 +44,4 @@ def test_merge_chat_fragments_keeps_single_csv_header(tmp_path):
     with first.open("r", encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
     assert [row["content"] for row in rows] == ["a", "b"]
+    assert list(rows[0]) == ["type", "timestamp", "offset_seconds", "nickname", "content"]

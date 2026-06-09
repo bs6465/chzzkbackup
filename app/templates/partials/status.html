@@ -9,6 +9,10 @@
           <span>{{ session.live_title }}</span>
           <span>{{ session.started_at }}</span>
         </div>
+        <form method="post" action="/recordings/{{ session.id }}/rename" class="rename">
+          <input name="title" value="{{ session.live_title }}">
+          <button type="submit">제목</button>
+        </form>
         <form method="post" action="/recordings/{{ session.id }}/stop">
           <button class="danger" type="submit">중지</button>
         </form>
@@ -26,6 +30,7 @@
       <div class="row">
         <div>
           <strong>#{{ job.id }} {{ job.status }}</strong>
+          {% if job.live_title %}<span>{{ job.live_title }}</span>{% endif %}
           <span>{{ job.final_path }}</span>
           {% if job.status in ["running", "completed"] %}
           {% set progress = job.progress_percent or 0 %}
@@ -43,6 +48,10 @@
           {% endif %}
           {% if job.error %}<span class="error">{{ job.error }}</span>{% endif %}
         </div>
+        <form method="post" action="/recordings/{{ job.session_id }}/rename" class="rename">
+          <input name="title" value="{{ job.live_title or '' }}">
+          <button type="submit">제목</button>
+        </form>
       </div>
       {% else %}
       <p class="muted">인코딩 작업이 없습니다.</p>
@@ -77,6 +86,10 @@
           {% if session.final_path %}<span>{{ session.final_path }}</span>{% endif %}
           {% if session.error %}<span class="error">{{ session.error }}</span>{% endif %}
         </div>
+        <form method="post" action="/recordings/{{ session.id }}/rename" class="rename">
+          <input name="title" value="{{ session.live_title }}">
+          <button type="submit">제목</button>
+        </form>
       </div>
       {% else %}
       <p class="muted">세션 이력이 없습니다.</p>

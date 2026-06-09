@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
-from .utils import sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
+from .utils import recording_name, sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
 
 
 class Database:
@@ -152,6 +152,9 @@ class Database:
     def get_channel(self, channel_id: str) -> dict[str, Any] | None:
         return self.query_one("SELECT * FROM channels WHERE id = ?", (channel_id,))
 
+    def get_session(self, session_id: int) -> dict[str, Any] | None:
+        return self.query_one("SELECT * FROM recording_sessions WHERE id = ?", (session_id,))
+
     def upsert_channel(self, channel_id: str, name: str, active: bool = True) -> None:
         now = utc_now_iso()
         self.execute(
@@ -231,6 +234,7 @@ class Database:
         chat_csv_path: Path,
         chat_jsonl_temp_path: Path | None = None,
         chat_csv_temp_path: Path | None = None,
+        final_path: Path | None = None,
     ) -> int:
         cur = self.execute(
             """
@@ -243,12 +247,13 @@ class Database:
               started_at,
               status,
               temp_path,
+              final_path,
               chat_jsonl_temp_path,
               chat_csv_temp_path,
               chat_jsonl_path,
               chat_csv_path
             )
-            VALUES (?, ?, ?, ?, ?, 'recording', ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'recording', ?, ?, ?, ?, ?, ?)
             """,
             (
                 channel_id,
@@ -257,6 +262,7 @@ class Database:
                 live_title,
                 started_at,
                 str(temp_path),
+                str(final_path) if final_path else None,
                 str(chat_jsonl_temp_path or chat_jsonl_path),
                 str(chat_csv_temp_path or chat_csv_path),
                 str(chat_jsonl_path),
@@ -264,6 +270,107 @@ class Database:
             ),
         )
         return int(cur.lastrowid)
+
+    def rename_session_title(self, session_id: int, title: str) -> dict[str, Any] | None:
+        row = self.get_session(session_id)
+        if not row:
+            return None
+        safe_title = sanitize_name(title, "untitled")
+        targets = self._session_target_paths(row, safe_title)
+
+        status = str(row["status"])
+        if status in {"queued", "completed", "failed"}:
+            self._move_if_present(row.get("final_path"), targets["final_path"])
+        if status in {"queued", "completed", "failed", "encoding"}:
+            self._move_if_present(row.get("chat_jsonl_path"), targets["chat_jsonl_path"])
+            self._move_if_present(row.get("chat_csv_path"), targets["chat_csv_path"])
+
+        self.execute(
+            """
+            UPDATE recording_sessions
+            SET live_title = ?,
+                final_path = ?,
+                chat_jsonl_path = ?,
+                chat_csv_path = ?
+            WHERE id = ?
+            """,
+            (
+                safe_title,
+                str(targets["final_path"]),
+                str(targets["chat_jsonl_path"]),
+                str(targets["chat_csv_path"]),
+                session_id,
+            ),
+        )
+        self.execute(
+            """
+            UPDATE encode_jobs
+            SET final_path = ?
+            WHERE session_id = ?
+            """,
+            (str(targets["final_path"]), session_id),
+        )
+        return self.get_session(session_id)
+
+    def finalize_encode_output(self, job_id: int, output_path: Path) -> Path:
+        job = self.query_one("SELECT * FROM encode_jobs WHERE id = ?", (job_id,))
+        if not job:
+            return output_path
+        target = Path(job["final_path"])
+        if target == output_path:
+            return output_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        destination = target
+        if destination.exists():
+            destination = unique_path(destination)
+        if output_path.exists():
+            shutil.move(str(output_path), str(destination))
+        self.execute(
+            "UPDATE encode_jobs SET final_path = ? WHERE id = ?",
+            (str(destination), job_id),
+        )
+        return destination
+
+    def _session_target_paths(self, row: dict[str, Any], title: str) -> dict[str, Path]:
+        started_at = self._parse_session_started_at(str(row["started_at"]))
+        base = recording_name(started_at, str(row["channel_name"]), title, "")
+        video_dir = self._path_parent(row.get("final_path")) or config.FINAL_ROOT / sanitize_name(row["channel_name"], "unknown")
+        chat_dir = self._path_parent(row.get("chat_jsonl_path")) or video_dir / "채팅"
+        current_paths = {
+            Path(value)
+            for value in [row.get("final_path"), row.get("chat_jsonl_path"), row.get("chat_csv_path")]
+            if value
+        }
+        for index in range(1000):
+            stem = base if index == 0 else f"{base}_{index}"
+            paths = {
+                "final_path": video_dir / f"{stem}.mp4",
+                "chat_jsonl_path": chat_dir / f"{stem}.jsonl",
+                "chat_csv_path": chat_dir / f"{stem}.csv",
+            }
+            if not any(path.exists() and path not in current_paths for path in paths.values()):
+                return paths
+        raise FileExistsError(f"Could not find available recording name for session {row['id']}")
+
+    def _parse_session_started_at(self, value: str) -> datetime:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return datetime.now(timezone.utc)
+
+    def _path_parent(self, value: Any) -> Path | None:
+        if not value:
+            return None
+        return Path(value).parent
+
+    def _move_if_present(self, current_value: Any, destination: Path) -> None:
+        if not current_value:
+            return
+        current = Path(current_value)
+        if current == destination or not current.exists():
+            return
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(current), str(destination))
 
     def finalize_session_chat_files(self, session_id: int) -> dict[str, Path | None]:
         row = self.query_one("SELECT * FROM recording_sessions WHERE id = ?", (session_id,))
@@ -460,7 +567,7 @@ class Database:
                 temp_path.replace(source_path)
                 video_dir = config.FINAL_ROOT / sanitize_name(row["channel_name"], "unknown")
                 video_dir.mkdir(parents=True, exist_ok=True)
-                final_path = unique_path(video_dir / f"{source_path.stem}.mp4")
+                final_path = Path(row["final_path"]) if row.get("final_path") else unique_path(video_dir / f"{source_path.stem}.mp4")
                 self.finish_session(session_id, source_path, "queued")
                 self.add_encode_job(session_id, source_path, final_path)
                 recovered["queued"] += 1
@@ -510,7 +617,16 @@ class Database:
         )
 
     def encode_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
-        return self.query_all("SELECT * FROM encode_jobs ORDER BY id DESC LIMIT ?", (limit,))
+        return self.query_all(
+            """
+            SELECT encode_jobs.*, recording_sessions.live_title, recording_sessions.channel_name
+            FROM encode_jobs
+            LEFT JOIN recording_sessions ON recording_sessions.id = encode_jobs.session_id
+            ORDER BY encode_jobs.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
 
     def add_log(self, level: str, message: str) -> None:
         self.execute(

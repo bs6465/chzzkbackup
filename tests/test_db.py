@@ -287,3 +287,129 @@ def test_update_encode_progress(tmp_path):
     assert job["speed"] == "2x"
     assert job["eta_seconds"] == 37.5
     assert job["progress_updated_at"]
+
+
+def test_rename_recording_session_updates_recording_final_paths_without_temp_move(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    temp_path = tmp_path / "temp" / "[260607 10-00-00] Streamer - Old.ts.part"
+    chat_jsonl_temp = tmp_path / "temp" / "[260607 10-00-00] Streamer - Old.chat.jsonl.part"
+    chat_csv_temp = tmp_path / "temp" / "[260607 10-00-00] Streamer - Old.chat.csv.part"
+    final_path = tmp_path / "final" / "Streamer" / "[260607 10-00-00] Streamer - Old.mp4"
+    session_id = database.create_session(
+        "abc123",
+        "Streamer",
+        "live-1",
+        "Old",
+        "2026-06-07T10:00:00+09:00",
+        temp_path,
+        tmp_path / "final" / "Streamer" / "채팅" / "[260607 10-00-00] Streamer - Old.jsonl",
+        tmp_path / "final" / "Streamer" / "채팅" / "[260607 10-00-00] Streamer - Old.csv",
+        chat_jsonl_temp,
+        chat_csv_temp,
+        final_path,
+    )
+
+    renamed = database.rename_session_title(session_id, "New / Title")
+
+    assert renamed["live_title"] == "New Title"
+    assert renamed["temp_path"] == str(temp_path)
+    assert renamed["chat_jsonl_temp_path"] == str(chat_jsonl_temp)
+    assert renamed["final_path"].endswith("[260607 10-00-00] Streamer - New Title.mp4")
+    assert renamed["chat_jsonl_path"].endswith("[260607 10-00-00] Streamer - New Title.jsonl")
+    assert renamed["chat_csv_path"].endswith("[260607 10-00-00] Streamer - New Title.csv")
+
+
+def test_rename_queued_session_updates_encode_job_final_path(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    source_path = tmp_path / "source.ts"
+    final_path = tmp_path / "final" / "Streamer" / "[260607 10-00-00] Streamer - Old.mp4"
+    session_id = database.create_session(
+        "abc123",
+        "Streamer",
+        "live-1",
+        "Old",
+        "2026-06-07T10:00:00+09:00",
+        tmp_path / "recording.ts.part",
+        tmp_path / "final" / "Streamer" / "채팅" / "[260607 10-00-00] Streamer - Old.jsonl",
+        tmp_path / "final" / "Streamer" / "채팅" / "[260607 10-00-00] Streamer - Old.csv",
+        final_path=final_path,
+    )
+    database.finish_session(session_id, source_path, "queued")
+    job_id = database.add_encode_job(session_id, source_path, final_path)
+
+    database.rename_session_title(session_id, "New")
+
+    job = database.query_one("SELECT * FROM encode_jobs WHERE id = ?", (job_id,))
+    assert job["final_path"].endswith("[260607 10-00-00] Streamer - New.mp4")
+
+
+def test_rename_completed_session_moves_video_and_chat_with_shared_suffix(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    video_dir = tmp_path / "final" / "Streamer"
+    chat_dir = video_dir / "채팅"
+    video_dir.mkdir(parents=True)
+    chat_dir.mkdir()
+    old_mp4 = video_dir / "[260607 10-00-00] Streamer - Old.mp4"
+    old_jsonl = chat_dir / "[260607 10-00-00] Streamer - Old.jsonl"
+    old_csv = chat_dir / "[260607 10-00-00] Streamer - Old.csv"
+    old_mp4.write_text("video", encoding="utf-8")
+    old_jsonl.write_text("jsonl", encoding="utf-8")
+    old_csv.write_text("csv", encoding="utf-8")
+    (video_dir / "[260607 10-00-00] Streamer - New.mp4").write_text("collision", encoding="utf-8")
+    session_id = database.create_session(
+        "abc123",
+        "Streamer",
+        "live-1",
+        "Old",
+        "2026-06-07T10:00:00+09:00",
+        tmp_path / "recording.ts.part",
+        old_jsonl,
+        old_csv,
+        final_path=old_mp4,
+    )
+    database.update_session_status(session_id, "completed", final_path=old_mp4)
+
+    renamed = database.rename_session_title(session_id, "New")
+
+    assert not old_mp4.exists()
+    assert not old_jsonl.exists()
+    assert not old_csv.exists()
+    assert renamed["final_path"].endswith("[260607 10-00-00] Streamer - New_1.mp4")
+    assert renamed["chat_jsonl_path"].endswith("[260607 10-00-00] Streamer - New_1.jsonl")
+    assert renamed["chat_csv_path"].endswith("[260607 10-00-00] Streamer - New_1.csv")
+    assert (video_dir / "[260607 10-00-00] Streamer - New_1.mp4").read_text(encoding="utf-8") == "video"
+    assert (chat_dir / "[260607 10-00-00] Streamer - New_1.jsonl").read_text(encoding="utf-8") == "jsonl"
+
+
+def test_finalize_encode_output_moves_running_job_to_renamed_path(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    old_output = tmp_path / "final" / "Streamer" / "[260607 10-00-00] Streamer - Old.mp4"
+    old_output.parent.mkdir(parents=True)
+    old_output.write_text("encoded", encoding="utf-8")
+    source_path = tmp_path / "source.ts"
+    session_id = database.create_session(
+        "abc123",
+        "Streamer",
+        "live-1",
+        "Old",
+        "2026-06-07T10:00:00+09:00",
+        tmp_path / "recording.ts.part",
+        tmp_path / "final" / "Streamer" / "채팅" / "[260607 10-00-00] Streamer - Old.jsonl",
+        tmp_path / "final" / "Streamer" / "채팅" / "[260607 10-00-00] Streamer - Old.csv",
+        final_path=old_output,
+    )
+    database.finish_session(session_id, source_path, "queued")
+    job_id = database.add_encode_job(session_id, source_path, old_output)
+    database.update_encode_job(job_id, "running")
+    database.update_session_status(session_id, "encoding")
+    database.rename_session_title(session_id, "New")
+
+    final_output = database.finalize_encode_output(job_id, old_output)
+
+    assert not old_output.exists()
+    assert final_output.name == "[260607 10-00-00] Streamer - New.mp4"
+    assert final_output.read_text(encoding="utf-8") == "encoded"
