@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import aiofiles
 
+from .chat_csv_migrate import STANDARD_CSV_FIELDS
 from .logger import logger
 from .utils import kst_iso, now_kst
 
@@ -131,7 +132,7 @@ class ChatCapture:
                     self._csv_file = csv_file
                     self._csv_writer = csv.DictWriter(
                         csv_file,
-                        fieldnames=["type", "timestamp", "offset_seconds", "nickname", "content"],
+                        fieldnames=STANDARD_CSV_FIELDS,
                     )
                     if csv_file.tell() == 0:
                         self._csv_writer.writeheader()

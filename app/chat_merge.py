@@ -9,6 +9,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .chat_csv_migrate import STANDARD_CSV_FIELDS
+
 CHAT_FILE_RE = re.compile(
     r"^\[(?P<date>\d{6}) (?P<time>\d{2}-\d{2}-\d{2})\] (?P<streamer>.+?) - (?P<title>.+)\.(?P<ext>jsonl|csv)$"
 )
@@ -82,7 +84,7 @@ def _read_jsonl_rows(paths: list[ParsedChatFile]) -> list[dict[str, Any]]:
 
 
 def _read_csv_rows(paths: list[ParsedChatFile]) -> tuple[list[str], list[dict[str, str]]]:
-    fieldnames: list[str] = ["type", "timestamp", "offset_seconds", "nickname", "content"]
+    fieldnames: list[str] = STANDARD_CSV_FIELDS
     rows: list[dict[str, str]] = []
     index = 0
     for item in sorted(paths, key=_file_sort_key):

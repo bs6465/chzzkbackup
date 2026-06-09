@@ -1,6 +1,6 @@
 services:
   chzzkbackup:
-    image: chzzkbackup:0.1.9
+    image: chzzkbackup:0.1.10
     build:
       context: .
     container_name: chzzkbackup

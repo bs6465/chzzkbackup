@@ -44,6 +44,12 @@ Compose는 `0.0.0.0:8733:8733`으로 포트를 열고, 컨테이너를 UID/GID `
 
 녹화 세션의 제목은 대시보드에서 수정할 수 있으며, 최종 영상과 채팅 파일명에도 같은 제목이 반영됩니다.
 
+기존 채팅 CSV를 새 표준 컬럼으로 통일하려면 다음 명령을 사용합니다.
+
+```bash
+uv run python -m app.chat_csv_migrate /home/bsubt/passport/chzzk_backup
+```
+
 ## Git 설정
 
 이 프로젝트의 원격 저장소는 다음 SSH 주소를 사용합니다.
