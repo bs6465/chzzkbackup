@@ -11,10 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from . import config
-from .chzzk_api import get_live_detail, streamlink_header_args
-from .chat_capture import ChatCapture
 from .db import db
 from .logger import logger
+from .platforms import create_chat_capture, get_live_info
 from .utils import ensure_storage_dirs, kst_iso, now_kst, recording_name, unique_path
 
 
@@ -81,6 +80,23 @@ async def pipe_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter
             writer.close()
             with contextlib.suppress(Exception):
                 await writer.wait_closed()
+
+
+def build_streamlink_command(streamlink: str, ffmpeg: str, live: Any) -> list[str]:
+    return [
+        streamlink,
+        "--stdout",
+        live.stream_url,
+        live.stream_name,
+        "--hls-live-restart",
+        "--stream-segment-threads",
+        "2",
+        *live.streamlink_args,
+        "--ffmpeg-ffmpeg",
+        ffmpeg,
+        "--ffmpeg-copyts",
+        "--hls-segment-stream-data",
+    ]
 
 
 class RecorderSupervisor:
@@ -154,26 +170,35 @@ class RecorderSupervisor:
                 return
 
             tokens = db.get_tokens()
+            twitcasting_token = db.get_twitcasting_token()
             try:
-                live = await get_live_detail(channel_id, tokens)
-                if not live or live.get("status") != "OPEN":
+                live = await get_live_info(channel, tokens, twitcasting_token)
+                if not live:
                     await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
                     continue
-                await self.record_once(channel, live, tokens)
+                await self.record_once(channel, live, tokens, twitcasting_token)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.exception("Recording loop error for %s: %s", channel_id, exc)
                 await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
 
-    async def record_once(self, channel: dict[str, Any], live: dict[str, Any], tokens: dict[str, str]) -> None:
+    async def record_once(
+        self,
+        channel: dict[str, Any],
+        live: Any,
+        tokens: dict[str, str],
+        twitcasting_token: str = "",
+    ) -> None:
         channel_id = str(channel["id"])
+        channel_display_id = str(channel.get("display_id") or channel_id)
+        platform = str(channel.get("platform") or "chzzk")
         channel_name = str(channel["name"])
-        live_id = str(live.get("liveId") or "")
-        live_title = str(live.get("liveTitle") or "untitled")
+        live_id = live.live_id
+        live_title = live.title
         started_at = now_kst()
 
-        video_dir, chat_dir = ensure_storage_dirs(channel_name)
+        video_dir, chat_dir = ensure_storage_dirs(channel_name, platform)
         config.TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
         base = recording_name(started_at, channel_name, live_title, "")
@@ -197,37 +222,31 @@ class RecorderSupervisor:
             chat_jsonl_temp_path,
             chat_csv_temp_path,
             final_path,
+            platform,
+            channel_display_id,
         )
         stop_event = asyncio.Event()
         active = ActiveRecording(session_id, channel_id, channel_name, stop_event)
         self.active[session_id] = active
-        logger.info("Recording started for %s: %s", channel_name, live_title)
+        logger.info("Recording started for %s %s: %s", platform, channel_name, live_title)
 
-        chat_capture = ChatCapture(channel_id, tokens, chat_jsonl_temp_path, chat_csv_temp_path, started_at)
-        chat_task = asyncio.create_task(chat_capture.run(stop_event.is_set))
+        chat_capture = create_chat_capture(
+            channel,
+            live,
+            tokens,
+            twitcasting_token,
+            chat_jsonl_temp_path,
+            chat_csv_temp_path,
+            started_at,
+        )
+        chat_task = asyncio.create_task(chat_capture.run(stop_event.is_set)) if chat_capture else None
 
         streamlink = shutil.which("streamlink")
         ffmpeg = shutil.which("ffmpeg")
         if not streamlink or not ffmpeg:
             raise RuntimeError("streamlink or ffmpeg is not installed")
 
-        stream_url = f"https://chzzk.naver.com/live/{channel_id}"
-        streamlink_cmd = [
-            streamlink,
-            "--stdout",
-            stream_url,
-            "best",
-            "--hls-live-restart",
-            "--plugin-dirs",
-            str(config.STREAMLINK_PLUGIN_DIR),
-            "--stream-segment-threads",
-            "2",
-            *streamlink_header_args(tokens),
-            "--ffmpeg-ffmpeg",
-            ffmpeg,
-            "--ffmpeg-copyts",
-            "--hls-segment-stream-data",
-        ]
+        streamlink_cmd = build_streamlink_command(streamlink, ffmpeg, live)
         ffmpeg_cmd = [
             ffmpeg,
             "-hide_banner",
@@ -304,8 +323,9 @@ class RecorderSupervisor:
         finally:
             stopped_by_request = stop_event.is_set()
             stop_event.set()
-            chat_task.cancel()
-            await asyncio.gather(chat_task, return_exceptions=True)
+            if chat_task:
+                chat_task.cancel()
+                await asyncio.gather(chat_task, return_exceptions=True)
             try:
                 moved = db.finalize_session_chat_files(session_id)
                 if moved["jsonl"] or moved["csv"]:

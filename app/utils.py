@@ -93,9 +93,12 @@ def unique_path(path: Path) -> Path:
     raise FileExistsError(f"Could not find available filename for {path}")
 
 
-def ensure_storage_dirs(streamer_name: str) -> tuple[Path, Path]:
+def ensure_storage_dirs(streamer_name: str, platform: str = "chzzk") -> tuple[Path, Path]:
     safe_name = sanitize_name(streamer_name, fallback="unknown")
-    video_dir = config.FINAL_ROOT / safe_name
+    if platform == "twitcasting":
+        video_dir = config.FINAL_ROOT / "트윗캐스트" / safe_name
+    else:
+        video_dir = config.FINAL_ROOT / safe_name
     chat_dir = video_dir / "채팅"
     video_dir.mkdir(parents=True, exist_ok=True)
     chat_dir.mkdir(parents=True, exist_ok=True)

@@ -1,3 +1,5 @@
+import sqlite3
+
 from app.db import Database
 
 
@@ -16,6 +18,88 @@ def test_channel_crud(tmp_path):
 
     database.delete_channel("abc123")
     assert database.get_channel("abc123") is None
+
+
+def test_platform_columns_backfill_existing_database(tmp_path):
+    db_path = tmp_path / "old.sqlite3"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE channels (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE settings (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE recording_sessions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          channel_id TEXT NOT NULL,
+          channel_name TEXT NOT NULL,
+          live_id TEXT,
+          live_title TEXT,
+          started_at TEXT NOT NULL,
+          ended_at TEXT,
+          status TEXT NOT NULL,
+          temp_path TEXT,
+          source_path TEXT,
+          final_path TEXT,
+          error TEXT
+        );
+        CREATE TABLE encode_jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id INTEGER NOT NULL,
+          source_path TEXT NOT NULL,
+          final_path TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          started_at TEXT,
+          finished_at TEXT
+        );
+        CREATE TABLE app_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          level TEXT NOT NULL,
+          message TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO channels (id, name, active, created_at, updated_at)
+        VALUES ('abc123', 'Streamer', 1, 'now', 'now');
+        INSERT INTO recording_sessions (channel_id, channel_name, live_title, started_at, status)
+        VALUES ('abc123', 'Streamer', 'Title', 'now', 'completed');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    database = Database(db_path)
+
+    channel = database.get_channel("abc123")
+    session = database.recent_sessions(1)[0]
+    assert channel["platform"] == "chzzk"
+    assert channel["display_id"] == "abc123"
+    assert session["platform"] == "chzzk"
+    assert session["channel_display_id"] == "abc123"
+
+
+def test_twitcasting_channel_crud_stores_display_id(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel(
+        "twitcasting:alice",
+        "Alice",
+        platform="twitcasting",
+        display_id="alice",
+    )
+
+    channel = database.get_channel("twitcasting:alice")
+
+    assert channel["platform"] == "twitcasting"
+    assert channel["display_id"] == "alice"
 
 
 def test_tokens(tmp_path):

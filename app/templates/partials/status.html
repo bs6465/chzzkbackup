@@ -5,7 +5,7 @@
       {% for session in active_sessions %}
       <div class="row">
         <div>
-          <strong>{{ session.channel_name }}</strong>
+          <strong>{{ session.platform|platform_label }} · {{ session.channel_name }}</strong>
           <span>{{ session.live_title }}</span>
           <span>{{ session.started_at }}</span>
         </div>
@@ -30,6 +30,7 @@
       <div class="row">
         <div>
           <strong>#{{ job.id }} {{ job.status }}</strong>
+          {% if job.platform %}<span>{{ job.platform|platform_label }} · {{ job.channel_name }}</span>{% endif %}
           {% if job.live_title %}<span>{{ job.live_title }}</span>{% endif %}
           <span>{{ job.final_path }}</span>
           {% if job.status in ["running", "completed"] %}
@@ -81,7 +82,7 @@
       {% for session in recent_sessions %}
       <div class="row">
         <div>
-          <strong>{{ session.channel_name }} · {{ session.status }}</strong>
+          <strong>{{ session.platform|platform_label }} · {{ session.channel_name }} · {{ session.status }}</strong>
           <span>{{ session.live_title }}</span>
           {% if session.final_path %}<span>{{ session.final_path }}</span>{% endif %}
           {% if session.error %}<span class="error">{{ session.error }}</span>{% endif %}

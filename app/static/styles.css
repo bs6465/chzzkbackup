@@ -115,7 +115,8 @@ label {
   font-size: 13px;
 }
 
-input {
+input,
+select {
   width: 100%;
   min-width: 0;
   border: 1px solid var(--line);
@@ -124,6 +125,10 @@ input {
   background: var(--panel);
   color: var(--text);
   font: inherit;
+}
+
+select {
+  width: auto;
 }
 
 button {

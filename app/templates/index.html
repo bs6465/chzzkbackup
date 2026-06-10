@@ -4,7 +4,12 @@
   <div class="panel">
     <h2>채널</h2>
     <form class="inline-form" method="post" action="/channels">
-      <input name="channel_id" placeholder="unique ID" required pattern="[A-Za-z0-9_-]{1,128}">
+      <select name="platform" aria-label="platform">
+        {% for platform in platforms %}
+        <option value="{{ platform.id }}">{{ platform.label }}</option>
+        {% endfor %}
+      </select>
+      <input name="channel_id" placeholder="unique ID / @screen_id / TwitCasting URL" required>
       <button type="submit">추가</button>
     </form>
     <div class="list">
@@ -12,7 +17,7 @@
       <div class="row">
         <div>
           <strong>{{ channel.name }}</strong>
-          <span>{{ channel.id }}</span>
+          <span>{{ channel.platform|platform_label }} · {{ channel.display_id or channel.id }}</span>
         </div>
         <form method="post" action="/channels/{{ channel.id }}/rename" class="rename">
           <input name="name" value="{{ channel.name }}">
@@ -32,7 +37,7 @@
   </div>
 
   <div class="panel">
-    <h2>토큰</h2>
+    <h2>치지직 토큰</h2>
     <form method="post" action="/tokens" class="stack">
       <label>NID_SES <input name="nid_ses" type="password" placeholder="{{ tokens_masked.NID_SES or 'not set' }}"></label>
       <label>NID_AUT <input name="nid_aut" type="password" placeholder="{{ tokens_masked.NID_AUT or 'not set' }}"></label>
@@ -40,6 +45,18 @@
     </form>
     <form method="post" action="/tokens/test" class="inline-form">
       <input name="channel_id" placeholder="테스트 채널 ID(선택)">
+      <button type="submit">테스트</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>트윗캐스트 토큰</h2>
+    <form method="post" action="/tokens/twitcasting" class="stack">
+      <label>Access Token <input name="access_token" type="password" placeholder="{{ twitcasting_token_masked or 'not set' }}"></label>
+      <button type="submit">저장</button>
+    </form>
+    <form method="post" action="/tokens/twitcasting/test" class="inline-form">
+      <input name="screen_id" placeholder="테스트 screen ID(선택)">
       <button type="submit">테스트</button>
     </form>
   </div>

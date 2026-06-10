@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
-from .utils import recording_name, sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
+from .utils import ensure_storage_dirs, recording_name, sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
 
 
 class Database:
@@ -29,6 +29,8 @@ class Database:
                 """
                 CREATE TABLE IF NOT EXISTS channels (
                   id TEXT PRIMARY KEY,
+                  platform TEXT NOT NULL DEFAULT 'chzzk',
+                  display_id TEXT,
                   name TEXT NOT NULL,
                   active INTEGER NOT NULL DEFAULT 1,
                   created_at TEXT NOT NULL,
@@ -43,7 +45,9 @@ class Database:
 
                 CREATE TABLE IF NOT EXISTS recording_sessions (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  platform TEXT NOT NULL DEFAULT 'chzzk',
                   channel_id TEXT NOT NULL,
+                  channel_display_id TEXT,
                   channel_name TEXT NOT NULL,
                   live_id TEXT,
                   live_title TEXT,
@@ -100,11 +104,26 @@ class Database:
                 },
             )
             self._ensure_columns(
+                "channels",
+                {
+                    "platform": "TEXT DEFAULT 'chzzk'",
+                    "display_id": "TEXT",
+                },
+            )
+            self._ensure_columns(
                 "recording_sessions",
                 {
+                    "platform": "TEXT DEFAULT 'chzzk'",
+                    "channel_display_id": "TEXT",
                     "chat_jsonl_temp_path": "TEXT",
                     "chat_csv_temp_path": "TEXT",
                 },
+            )
+            self._conn.execute("UPDATE channels SET platform = 'chzzk' WHERE platform IS NULL")
+            self._conn.execute("UPDATE channels SET display_id = id WHERE display_id IS NULL")
+            self._conn.execute("UPDATE recording_sessions SET platform = 'chzzk' WHERE platform IS NULL")
+            self._conn.execute(
+                "UPDATE recording_sessions SET channel_display_id = channel_id WHERE channel_display_id IS NULL"
             )
             self._chmod_private()
 
@@ -155,17 +174,28 @@ class Database:
     def get_session(self, session_id: int) -> dict[str, Any] | None:
         return self.query_one("SELECT * FROM recording_sessions WHERE id = ?", (session_id,))
 
-    def upsert_channel(self, channel_id: str, name: str, active: bool = True) -> None:
+    def upsert_channel(
+        self,
+        channel_id: str,
+        name: str,
+        active: bool = True,
+        *,
+        platform: str = "chzzk",
+        display_id: str | None = None,
+    ) -> None:
         now = utc_now_iso()
+        display_id = display_id or channel_id
         self.execute(
             """
-            INSERT INTO channels (id, name, active, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO channels (id, platform, display_id, name, active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
+              platform = excluded.platform,
+              display_id = excluded.display_id,
               name = excluded.name,
               updated_at = excluded.updated_at
             """,
-            (channel_id, name, int(active), now, now),
+            (channel_id, platform, display_id, name, int(active), now, now),
         )
 
     def rename_channel(self, channel_id: str, name: str) -> None:
@@ -222,6 +252,13 @@ class Database:
             "NID_AUT": sanitize_cookie_value(tokens.get("NID_AUT", "")),
         }
 
+    def set_twitcasting_token(self, access_token: str) -> None:
+        self.set_setting("twitcasting_token", sanitize_cookie_value(access_token))
+
+    def get_twitcasting_token(self) -> str:
+        value = self.get_setting("twitcasting_token", "")
+        return sanitize_cookie_value(value)
+
     def create_session(
         self,
         channel_id: str,
@@ -235,12 +272,17 @@ class Database:
         chat_jsonl_temp_path: Path | None = None,
         chat_csv_temp_path: Path | None = None,
         final_path: Path | None = None,
+        platform: str = "chzzk",
+        channel_display_id: str | None = None,
     ) -> int:
+        channel_display_id = channel_display_id or channel_id
         cur = self.execute(
             """
             INSERT INTO recording_sessions
             (
+              platform,
               channel_id,
+              channel_display_id,
               channel_name,
               live_id,
               live_title,
@@ -253,10 +295,12 @@ class Database:
               chat_jsonl_path,
               chat_csv_path
             )
-            VALUES (?, ?, ?, ?, ?, 'recording', ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'recording', ?, ?, ?, ?, ?, ?)
             """,
             (
+                platform,
                 channel_id,
+                channel_display_id,
                 channel_name,
                 live_id,
                 live_title,
@@ -334,7 +378,10 @@ class Database:
     def _session_target_paths(self, row: dict[str, Any], title: str) -> dict[str, Path]:
         started_at = self._parse_session_started_at(str(row["started_at"]))
         base = recording_name(started_at, str(row["channel_name"]), title, "")
-        video_dir = self._path_parent(row.get("final_path")) or config.FINAL_ROOT / sanitize_name(row["channel_name"], "unknown")
+        video_dir = self._path_parent(row.get("final_path")) or ensure_storage_dirs(
+            str(row["channel_name"]),
+            str(row.get("platform") or "chzzk"),
+        )[0]
         chat_dir = self._path_parent(row.get("chat_jsonl_path")) or video_dir / "채팅"
         current_paths = {
             Path(value)
@@ -565,7 +612,10 @@ class Database:
             if temp_path.exists() and temp_path.stat().st_size > 0:
                 source_path = unique_path(temp_path.with_suffix(""))
                 temp_path.replace(source_path)
-                video_dir = config.FINAL_ROOT / sanitize_name(row["channel_name"], "unknown")
+                video_dir = ensure_storage_dirs(
+                    str(row["channel_name"]),
+                    str(row.get("platform") or "chzzk"),
+                )[0]
                 video_dir.mkdir(parents=True, exist_ok=True)
                 final_path = Path(row["final_path"]) if row.get("final_path") else unique_path(video_dir / f"{source_path.stem}.mp4")
                 self.finish_session(session_id, source_path, "queued")
@@ -619,7 +669,10 @@ class Database:
     def encode_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.query_all(
             """
-            SELECT encode_jobs.*, recording_sessions.live_title, recording_sessions.channel_name
+            SELECT encode_jobs.*,
+                   recording_sessions.live_title,
+                   recording_sessions.channel_name,
+                   recording_sessions.platform
             FROM encode_jobs
             LEFT JOIN recording_sessions ON recording_sessions.id = encode_jobs.session_id
             ORDER BY encode_jobs.id DESC
