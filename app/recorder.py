@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import aiohttp
+
 from . import config
 from .db import db
 from .logger import logger
@@ -99,12 +101,34 @@ def build_streamlink_command(streamlink: str, ffmpeg: str, live: Any) -> list[st
     ]
 
 
+NETWORK_ERRORS = (
+    aiohttp.ClientConnectionError,
+    aiohttp.ServerTimeoutError,
+    asyncio.TimeoutError,
+)
+
+
 class RecorderSupervisor:
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._channel_tasks: dict[str, asyncio.Task] = {}
+        self._network_error_log_at: dict[str, float] = {}
         self.active: dict[int, ActiveRecording] = {}
+
+    def _should_log_network_error(self, channel_id: str) -> bool:
+        now = asyncio.get_running_loop().time()
+        last_logged_at = self._network_error_log_at.get(channel_id)
+        if (
+            last_logged_at is None
+            or now - last_logged_at >= config.NETWORK_ERROR_LOG_INTERVAL_SECONDS
+        ):
+            self._network_error_log_at[channel_id] = now
+            return True
+        return False
+
+    def _clear_network_error(self, channel_id: str) -> None:
+        self._network_error_log_at.pop(channel_id, None)
 
     def start(self) -> None:
         if not self._task:
@@ -173,6 +197,25 @@ class RecorderSupervisor:
             twitcasting_token = db.get_twitcasting_token()
             try:
                 live = await get_live_info(channel, tokens, twitcasting_token)
+            except asyncio.CancelledError:
+                raise
+            except NETWORK_ERRORS as exc:
+                if self._should_log_network_error(channel_id):
+                    logger.warning(
+                        "Temporary network error while polling %s; retrying in %ss: %s",
+                        channel_id,
+                        config.POLL_INTERVAL_SECONDS,
+                        exc,
+                    )
+                await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+                continue
+            except Exception as exc:
+                logger.exception("Recording loop error for %s: %s", channel_id, exc)
+                await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+                continue
+
+            self._clear_network_error(channel_id)
+            try:
                 if not live:
                     await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
                     continue

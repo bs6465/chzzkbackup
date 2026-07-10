@@ -1,6 +1,6 @@
 [project]
 name = "chzzkbackup"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local CHZZK and TwitCasting live recorder and chat backup dashboard"
 readme = "README.md"
 requires-python = ">=3.12"

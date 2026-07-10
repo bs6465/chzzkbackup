@@ -21,4 +21,4 @@ RUN mkdir -p /app/data /app/temp /data/chzzk_backup
 
 EXPOSE 8733
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8733"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8733", "--no-access-log"]
