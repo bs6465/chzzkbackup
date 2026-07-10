@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import config
+from . import __version__, config
 from .chzzk_api import test_tokens as test_chzzk_tokens
 from .db import db
 from .encoder import EncodeWorker
@@ -64,6 +64,11 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="ChzzkBackup", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
+
+@app.get("/health")
+async def health():
+    return {"ok": True, "version": __version__}
 
 
 def status_context() -> dict:

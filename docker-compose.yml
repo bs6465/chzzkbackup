@@ -1,6 +1,6 @@
 services:
   chzzkbackup:
-    image: chzzkbackup:0.2.1
+    image: chzzkbackup:0.2.2
     build:
       context: .
     container_name: chzzkbackup
@@ -15,8 +15,22 @@ services:
       DISK_WARN_BYTES: "107374182400"
       LOG_RETENTION_MAX_ROWS: "1000"
     ports:
-      - "0.0.0.0:8733:8733"
+      - "100.105.18.90:8733:8733"
     volumes:
       - ./data:/app/data
       - ./temp:/app/temp
       - /home/bsubt/passport/chzzk_backup:/data/chzzk_backup
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8733/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

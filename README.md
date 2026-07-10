@@ -16,7 +16,7 @@ Docker Compose 홈서버에서 실행하는 치지직/트윗캐스트 생방송 
 
 ## 경로
 
-- 대시보드: `http://<서버 IP>:8733`
+- 대시보드: `http://100.105.18.90:8733` (Tailscale 전용)
 - 임시 녹화 파일: `./temp`
 - 임시 채팅 파일: `./temp/*.chat.jsonl.part`, `./temp/*.chat.csv.part`
 - 앱 DB 및 로그 상태: `./data`
@@ -33,7 +33,7 @@ docker compose build
 docker compose up -d
 ```
 
-Compose는 `0.0.0.0:8733:8733`으로 포트를 열고, 컨테이너를 UID/GID `1000:1000`으로 실행합니다.
+Compose는 Tailscale 주소 `100.105.18.90:8733`에만 포트를 열고, 컨테이너를 UID/GID `1000:1000`으로 실행합니다. 헬스 엔드포인트는 `/health`입니다.
 
 ## 운영 방식
 

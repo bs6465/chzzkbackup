@@ -11,8 +11,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-COPY pyproject.toml README.md VERSION ./
-RUN uv pip install .
+COPY pyproject.toml uv.lock README.md VERSION ./
+RUN uv export --frozen --no-dev --no-emit-project --format requirements-txt --output-file /tmp/requirements.txt \
+    && uv pip install --requirement /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
 
 COPY app ./app
 RUN chmod -R a+rX /app/app
