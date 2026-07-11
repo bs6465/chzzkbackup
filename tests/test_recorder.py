@@ -1,4 +1,5 @@
 from datetime import datetime
+import json
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -76,3 +77,26 @@ async def test_channel_loop_rate_limits_network_errors(monkeypatch):
         "Temporary network error while polling channel-1; retrying in 0s: dns failed",
     ]
     assert exceptions == []
+
+
+def test_merge_segment_chats_folds_video_gaps_and_preserves_unsynced(tmp_path):
+    first = tmp_path / "first.jsonl"
+    missing = tmp_path / "missing.jsonl"
+    second = tmp_path / "second.jsonl"
+    first.write_text(json.dumps({"type":"chat","offset_seconds":2,"nickname":"a","content":"one"}) + "\n")
+    missing.write_text(json.dumps({"type":"chat","offset_seconds":4,"nickname":"b","content":"gap"}) + "\n")
+    second.write_text(json.dumps({"type":"chat","offset_seconds":3,"nickname":"c","content":"two"}) + "\n")
+    segments = [
+        {"chat_jsonl_path": str(first), "has_video": 1, "duration_seconds": 10},
+        {"chat_jsonl_path": str(missing), "has_video": 0, "duration_seconds": None},
+        {"chat_jsonl_path": str(second), "has_video": 1, "duration_seconds": 5},
+    ]
+    destination = tmp_path / "final.jsonl"
+
+    RecorderSupervisor()._merge_segment_chats(segments, destination, tmp_path / "final.csv")
+
+    rows = [json.loads(line) for line in destination.read_text().splitlines()]
+    assert [row["offset_seconds"] for row in rows] == [2.0, None, 13.0]
+    assert not first.exists()
+    assert not missing.exists()
+    assert not second.exists()

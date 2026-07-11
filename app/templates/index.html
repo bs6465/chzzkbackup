@@ -1,6 +1,19 @@
 {% extends "base.html" %}
 {% block content %}
-<section class="grid">
+<section class="summary-grid">
+  <div class="summary-card"><strong>{{ active_sessions|length }}</strong><span>녹화 중</span></div>
+  <div class="summary-card"><strong>{{ encode_jobs|selectattr('status', 'equalto', 'running')|list|length }}</strong><span>인코딩 중</span></div>
+  <div class="summary-card"><strong>{{ media_summary.available }}</strong><span>재생 가능 영상</span></div>
+  <div class="summary-card {{ 'warn' if media_summary.unavailable else '' }}"><strong>{{ media_summary.unavailable }}</strong><span>누락 파일</span></div>
+</section>
+
+<div id="status" hx-get="/partials/status" hx-trigger="every 3s" hx-swap="innerHTML">
+  {% include "partials/status.html" %}
+</div>
+
+<details class="settings-panel">
+  <summary>채널 및 토큰 설정</summary>
+<section class="grid settings-grid">
   <div class="panel">
     <h2>채널</h2>
     <form class="inline-form" method="post" action="/channels">
@@ -61,10 +74,7 @@
     </form>
   </div>
 </section>
-
-<div id="status" hx-get="/partials/status" hx-trigger="every 3s" hx-swap="innerHTML">
-  {% include "partials/status.html" %}
-</div>
+</details>
 
 <div id="logs" hx-get="/partials/logs" hx-trigger="every 5s" hx-swap="innerHTML">
   {% include "partials/logs.html" %}

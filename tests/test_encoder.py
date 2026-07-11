@@ -22,6 +22,12 @@ def test_build_x264_mp4_command():
     assert cmd[-1] == "/tmp/out.mp4"
 
 
+def test_build_x264_mp4_command_supports_concat_manifest():
+    cmd = build_x264_mp4_command(Path("/tmp/in.concat"), Path("/tmp/out.mp4"))
+    assert cmd[cmd.index("-f") + 1] == "concat"
+    assert "-safe" in cmd
+
+
 def test_parse_ffmpeg_seconds():
     assert parse_ffmpeg_seconds("00:01:02.500000") == 62.5
     assert parse_ffmpeg_seconds("2500000") == 2.5

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading">
+  <div><h2>영상 보관함</h2><p class="muted">재생 가능한 영상 {{ total }}개</p></div>
+</section>
+<form class="filter-bar" method="get" action="/library">
+  <input name="q" value="{{ q }}" placeholder="제목 또는 채널 검색">
+  <select name="platform"><option value="">모든 플랫폼</option>{% for item in platforms %}<option value="{{ item.id }}" {{ 'selected' if platform == item.id else '' }}>{{ item.label }}</option>{% endfor %}</select>
+  <select name="channel"><option value="">모든 채널</option>{% for name in channels %}<option value="{{ name }}" {{ 'selected' if channel == name else '' }}>{{ name }}</option>{% endfor %}</select>
+  <input type="date" name="date_from" value="{{ date_from }}" aria-label="시작 날짜">
+  <input type="date" name="date_to" value="{{ date_to }}" aria-label="종료 날짜">
+  <select name="sort"><option value="desc" {{ 'selected' if sort == 'desc' else '' }}>최신순</option><option value="asc" {{ 'selected' if sort == 'asc' else '' }}>오래된순</option></select>
+  <button>검색</button>
+</form>
+<section class="media-grid">
+  {% for item in items %}
+  <a class="media-card" href="/library/{{ item.id }}">
+    <div class="media-thumb">{% if item.thumbnail_path %}<img src="/media/{{ item.id }}/thumbnail" alt="" loading="lazy">{% else %}<span>미리보기 생성 중</span>{% endif %}</div>
+    <div class="media-info"><strong>{{ item.title }}</strong><span>{{ item.channel_name }} · {{ item.platform|platform_label }}</span><span>{{ item.started_at|kst_datetime }} · {{ item.duration_seconds|duration }} · {{ item.size_bytes|bytes }}</span></div>
+  </a>
+  {% else %}<div class="panel muted">조건에 맞는 영상이 없습니다.</div>{% endfor %}
+</section>
+{% if pages > 1 %}<nav class="pagination">
+  {% if page > 1 %}<a href="?q={{ q }}&platform={{ platform }}&channel={{ channel }}&date_from={{ date_from }}&date_to={{ date_to }}&sort={{ sort }}&page={{ page - 1 }}">이전</a>{% endif %}
+  <span>{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a href="?q={{ q }}&platform={{ platform }}&channel={{ channel }}&date_from={{ date_from }}&date_to={{ date_to }}&sort={{ sort }}&page={{ page + 1 }}">다음</a>{% endif %}
+</nav>{% endif %}
+{% endblock %}

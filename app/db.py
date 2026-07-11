@@ -21,7 +21,28 @@ class Database:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._backup_before_migration()
         self.migrate()
+
+    def _backup_before_migration(self) -> None:
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        has_schema = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recording_sessions'"
+        ).fetchone()
+        if version >= 3 or not has_schema:
+            return
+        backup_dir = self.path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        destination = backup_dir / f"{self.path.stem}-pre-v3-{stamp}.sqlite3"
+        backup = sqlite3.connect(destination)
+        try:
+            self._conn.backup(backup)
+        finally:
+            backup.close()
+        backups = sorted(backup_dir.glob(f"{self.path.stem}-pre-v3-*.sqlite3"), reverse=True)
+        for old in backups[config.DB_BACKUP_KEEP :]:
+            old.unlink(missing_ok=True)
 
     def migrate(self) -> None:
         with self._lock, self._conn:
@@ -90,6 +111,44 @@ class Database:
                   message TEXT NOT NULL,
                   created_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS recording_segments (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  session_id INTEGER NOT NULL,
+                  sequence INTEGER NOT NULL,
+                  source_path TEXT,
+                  chat_jsonl_path TEXT,
+                  chat_csv_path TEXT,
+                  started_at TEXT NOT NULL,
+                  ended_at TEXT,
+                  duration_seconds REAL,
+                  has_video INTEGER NOT NULL DEFAULT 0,
+                  error TEXT,
+                  FOREIGN KEY(session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE,
+                  UNIQUE(session_id, sequence)
+                );
+
+                CREATE TABLE IF NOT EXISTS media_items (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  session_id INTEGER,
+                  platform TEXT NOT NULL DEFAULT 'chzzk',
+                  channel_name TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  started_at TEXT NOT NULL,
+                  video_path TEXT NOT NULL UNIQUE,
+                  chat_jsonl_path TEXT,
+                  chat_csv_path TEXT,
+                  thumbnail_path TEXT,
+                  duration_seconds REAL,
+                  size_bytes INTEGER NOT NULL DEFAULT 0,
+                  status TEXT NOT NULL DEFAULT 'available',
+                  indexed_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  FOREIGN KEY(session_id) REFERENCES recording_sessions(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_media_started ON media_items(started_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_media_channel ON media_items(channel_name);
                 """
             )
             self._ensure_columns(
@@ -101,6 +160,8 @@ class Database:
                     "speed": "TEXT",
                     "eta_seconds": "REAL",
                     "progress_updated_at": "TEXT",
+                    "retry_count": "INTEGER DEFAULT 0",
+                    "next_retry_at": "TEXT",
                 },
             )
             self._ensure_columns(
@@ -117,6 +178,8 @@ class Database:
                     "channel_display_id": "TEXT",
                     "chat_jsonl_temp_path": "TEXT",
                     "chat_csv_temp_path": "TEXT",
+                    "retry_count": "INTEGER DEFAULT 0",
+                    "next_retry_at": "TEXT",
                 },
             )
             self._conn.execute("UPDATE channels SET platform = 'chzzk' WHERE platform IS NULL")
@@ -125,6 +188,7 @@ class Database:
             self._conn.execute(
                 "UPDATE recording_sessions SET channel_display_id = channel_id WHERE channel_display_id IS NULL"
             )
+            self._conn.execute("PRAGMA user_version = 3")
             self._chmod_private()
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
@@ -505,10 +569,84 @@ class Database:
         )
         return int(cur.lastrowid)
 
+    def add_recording_segment(
+        self,
+        session_id: int,
+        sequence: int,
+        source_path: Path | None,
+        chat_jsonl_path: Path | None,
+        chat_csv_path: Path | None,
+        started_at: str,
+        *,
+        duration_seconds: float | None = None,
+        has_video: bool = False,
+        error: str | None = None,
+    ) -> int:
+        cur = self.execute(
+            """
+            INSERT INTO recording_segments
+            (session_id, sequence, source_path, chat_jsonl_path, chat_csv_path,
+             started_at, ended_at, duration_seconds, has_video, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                session_id,
+                sequence,
+                str(source_path) if source_path else None,
+                str(chat_jsonl_path) if chat_jsonl_path else None,
+                str(chat_csv_path) if chat_csv_path else None,
+                started_at,
+                utc_now_iso(),
+                duration_seconds,
+                int(has_video),
+                error,
+            ),
+        )
+        return int(cur.lastrowid)
+
+    def recording_segments(self, session_id: int) -> list[dict[str, Any]]:
+        return self.query_all(
+            "SELECT * FROM recording_segments WHERE session_id = ? ORDER BY sequence",
+            (session_id,),
+        )
+
+    def update_recording_retry(self, session_id: int, retry_count: int, delay_seconds: int, error: str) -> None:
+        next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        self.execute(
+            """
+            UPDATE recording_sessions
+            SET status = 'retrying', retry_count = ?, next_retry_at = ?, error = ?
+            WHERE id = ?
+            """,
+            (retry_count, next_retry.isoformat(), error, session_id),
+        )
+
     def next_encode_job(self) -> dict[str, Any] | None:
         return self.query_one(
-            "SELECT * FROM encode_jobs WHERE status = 'queued' ORDER BY id LIMIT 1"
+            """
+            SELECT * FROM encode_jobs
+            WHERE status = 'queued'
+              AND (next_retry_at IS NULL OR next_retry_at <= ?)
+            ORDER BY id LIMIT 1
+            """,
+            (utc_now_iso(),),
         )
+
+    def schedule_encode_retry(self, job_id: int, session_id: int, error: str, delay_seconds: int) -> int:
+        row = self.query_one("SELECT retry_count FROM encode_jobs WHERE id = ?", (job_id,)) or {}
+        retry_count = int(row.get("retry_count") or 0) + 1
+        next_retry = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+        self.execute(
+            """
+            UPDATE encode_jobs
+            SET status = 'queued', retry_count = ?, next_retry_at = ?, error = ?,
+                finished_at = NULL, progress_updated_at = ?
+            WHERE id = ?
+            """,
+            (retry_count, next_retry.isoformat(), error, utc_now_iso(), job_id),
+        )
+        self.update_session_status(session_id, "queued", error=error)
+        return retry_count
 
     def update_encode_job(self, job_id: int, status: str, error: str | None = None) -> None:
         fields = ["status = ?"]
@@ -595,11 +733,106 @@ class Database:
                 speed = NULL,
                 eta_seconds = NULL,
                 progress_updated_at = NULL
+                , next_retry_at = NULL
             WHERE id = ?
             """,
             (job_id,),
         )
         self.update_session_status(session_id, "queued")
+
+    def upsert_media_item(
+        self,
+        *,
+        video_path: Path,
+        channel_name: str,
+        title: str,
+        started_at: str,
+        platform: str = "chzzk",
+        session_id: int | None = None,
+        chat_jsonl_path: Path | None = None,
+        chat_csv_path: Path | None = None,
+        thumbnail_path: Path | None = None,
+        duration_seconds: float | None = None,
+        size_bytes: int = 0,
+        status: str = "available",
+    ) -> int:
+        now = utc_now_iso()
+        self.execute(
+            """
+            INSERT INTO media_items
+            (session_id, platform, channel_name, title, started_at, video_path,
+             chat_jsonl_path, chat_csv_path, thumbnail_path, duration_seconds,
+             size_bytes, status, indexed_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(video_path) DO UPDATE SET
+              session_id = COALESCE(excluded.session_id, media_items.session_id),
+              platform = excluded.platform, channel_name = excluded.channel_name,
+              title = excluded.title, started_at = excluded.started_at,
+              chat_jsonl_path = COALESCE(excluded.chat_jsonl_path, media_items.chat_jsonl_path),
+              chat_csv_path = COALESCE(excluded.chat_csv_path, media_items.chat_csv_path),
+              thumbnail_path = COALESCE(excluded.thumbnail_path, media_items.thumbnail_path),
+              duration_seconds = COALESCE(excluded.duration_seconds, media_items.duration_seconds),
+              size_bytes = excluded.size_bytes, status = excluded.status,
+              updated_at = excluded.updated_at
+            """,
+            (
+                session_id, platform, channel_name, title, started_at, str(video_path),
+                str(chat_jsonl_path) if chat_jsonl_path else None,
+                str(chat_csv_path) if chat_csv_path else None,
+                str(thumbnail_path) if thumbnail_path else None,
+                duration_seconds, size_bytes, status, now, now,
+            ),
+        )
+        row = self.query_one("SELECT id FROM media_items WHERE video_path = ?", (str(video_path),))
+        return int(row["id"])
+
+    def get_media_item(self, media_id: int) -> dict[str, Any] | None:
+        return self.query_one("SELECT * FROM media_items WHERE id = ?", (media_id,))
+
+    def media_channels(self) -> list[str]:
+        return [str(row["channel_name"]) for row in self.query_all(
+            "SELECT DISTINCT channel_name FROM media_items WHERE status = 'available' ORDER BY channel_name COLLATE NOCASE"
+        )]
+
+    def list_media(
+        self, *, q: str = "", platform: str = "", channel: str = "",
+        date_from: str = "", date_to: str = "", sort: str = "desc",
+        page: int = 1, page_size: int = config.MEDIA_PAGE_SIZE,
+    ) -> tuple[list[dict[str, Any]], int]:
+        where = ["status = 'available'"]
+        params: list[Any] = []
+        if q:
+            where.append("(title LIKE ? OR channel_name LIKE ?)")
+            params.extend([f"%{q}%", f"%{q}%"])
+        if platform:
+            where.append("platform = ?")
+            params.append(platform)
+        if channel:
+            where.append("channel_name = ?")
+            params.append(channel)
+        if date_from:
+            where.append("started_at >= ?")
+            params.append(date_from)
+        if date_to:
+            where.append("started_at < date(?, '+1 day')")
+            params.append(date_to)
+        clause = " AND ".join(where)
+        total = int(self.query_one(f"SELECT count(*) AS count FROM media_items WHERE {clause}", tuple(params))["count"])
+        direction = "ASC" if sort == "asc" else "DESC"
+        rows = self.query_all(
+            f"SELECT * FROM media_items WHERE {clause} ORDER BY started_at {direction}, id {direction} LIMIT ? OFFSET ?",
+            (*params, page_size, max(0, page - 1) * page_size),
+        )
+        return rows, total
+
+    def media_summary(self) -> dict[str, int]:
+        row = self.query_one(
+            """SELECT count(*) AS total,
+                      sum(CASE WHEN status='available' THEN 1 ELSE 0 END) AS available,
+                      sum(CASE WHEN status='unavailable' THEN 1 ELSE 0 END) AS unavailable
+               FROM media_items"""
+        ) or {}
+        return {key: int(row.get(key) or 0) for key in ("total", "available", "unavailable")}
 
     def recover_interrupted_sessions(self) -> dict[str, int]:
         recovered = {"queued": 0, "failed": 0}
@@ -608,6 +841,39 @@ class Database:
         for row in rows:
             session_id = int(row["id"])
             temp_path = Path(row["temp_path"])
+            segments = self.recording_segments(session_id)
+            current_jsonl = Path(row["chat_jsonl_temp_path"]) if row.get("chat_jsonl_temp_path") else None
+            current_csv = Path(row["chat_csv_temp_path"]) if row.get("chat_csv_temp_path") else None
+            if segments:
+                sequence = max(int(segment["sequence"]) for segment in segments) + 1
+                recovered_source: Path | None = None
+                if temp_path.exists() and temp_path.stat().st_size > 0:
+                    recovered_source = unique_path(temp_path.with_suffix(""))
+                    temp_path.replace(recovered_source)
+                recovered_jsonl = self._recover_part_file(current_jsonl)
+                recovered_csv = self._recover_part_file(current_csv)
+                if recovered_source or recovered_jsonl or recovered_csv:
+                    self.add_recording_segment(
+                        session_id, sequence, recovered_source, recovered_jsonl, recovered_csv,
+                        str(row.get("started_at") or now), has_video=bool(recovered_source),
+                        error="Recording segment was interrupted by application restart",
+                    )
+                    segments = self.recording_segments(session_id)
+                sources = [Path(segment["source_path"]) for segment in segments if segment.get("has_video") and segment.get("source_path") and Path(segment["source_path"]).exists()]
+                if sources:
+                    source_path = sources[0]
+                    if len(sources) > 1:
+                        source_path = config.TEMP_DIR / f"session-{session_id}.concat"
+                        lines = ["ffconcat version 1.0"]
+                        for source in sources:
+                            escaped = str(source).replace("'", "'\\''")
+                            lines.append(f"file '{escaped}'")
+                        source_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                    final_path = Path(row["final_path"])
+                    self.finish_session(session_id, source_path, "queued")
+                    self.add_encode_job(session_id, source_path, final_path)
+                    recovered["queued"] += 1
+                    continue
             self.finalize_session_chat_files(session_id)
             if temp_path.exists() and temp_path.stat().st_size > 0:
                 source_path = unique_path(temp_path.with_suffix(""))
@@ -632,6 +898,15 @@ class Database:
                 )
                 recovered["failed"] += 1
         return recovered
+
+    def _recover_part_file(self, path: Path | None) -> Path | None:
+        if not path or not path.exists() or path.stat().st_size == 0:
+            return None
+        destination = path.with_suffix("") if path.suffix == ".part" else path
+        if destination != path:
+            destination = unique_path(destination)
+            path.replace(destination)
+        return destination
 
     def recover_interrupted_encode_jobs(self) -> dict[str, int]:
         recovered = {"queued": 0, "completed": 0, "failed": 0}

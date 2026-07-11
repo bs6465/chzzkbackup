@@ -5,6 +5,8 @@ import contextlib
 import os
 import signal
 import shutil
+import csv
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -16,6 +18,7 @@ from . import config
 from .db import db
 from .logger import logger
 from .platforms import create_chat_capture, get_live_info
+from .chat_csv_migrate import STANDARD_CSV_FIELDS
 from .utils import ensure_storage_dirs, kst_iso, now_kst, recording_name, unique_path
 
 
@@ -245,11 +248,10 @@ class RecorderSupervisor:
         config.TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
         base = recording_name(started_at, channel_name, live_title, "")
-        temp_path = unique_path(config.TEMP_DIR / f"{base}.ts.part")
-        source_path = temp_path.with_suffix("")
+        temp_path = unique_path(config.TEMP_DIR / f"{base}.segment-001.ts.part")
         final_path = unique_path(video_dir / f"{base}.mp4")
-        chat_jsonl_temp_path = unique_path(config.TEMP_DIR / f"{base}.chat.jsonl.part")
-        chat_csv_temp_path = unique_path(config.TEMP_DIR / f"{base}.chat.csv.part")
+        chat_jsonl_temp_path = unique_path(config.TEMP_DIR / f"{base}.segment-001.chat.jsonl.part")
+        chat_csv_temp_path = unique_path(config.TEMP_DIR / f"{base}.segment-001.chat.csv.part")
         chat_jsonl_path = chat_dir / f"{base}.jsonl"
         chat_csv_path = chat_dir / f"{base}.csv"
 
@@ -272,109 +274,235 @@ class RecorderSupervisor:
         active = ActiveRecording(session_id, channel_id, channel_name, stop_event)
         self.active[session_id] = active
         logger.info("Recording started for %s %s: %s", platform, channel_name, live_title)
-
-        chat_capture = create_chat_capture(
-            channel,
-            live,
-            tokens,
-            twitcasting_token,
-            chat_jsonl_temp_path,
-            chat_csv_temp_path,
-            started_at,
-        )
-        chat_task = asyncio.create_task(chat_capture.run(stop_event.is_set)) if chat_capture else None
-
-        streamlink = shutil.which("streamlink")
-        ffmpeg = shutil.which("ffmpeg")
-        if not streamlink or not ffmpeg:
-            raise RuntimeError("streamlink or ffmpeg is not installed")
-
-        streamlink_cmd = build_streamlink_command(streamlink, ffmpeg, live)
-        ffmpeg_cmd = [
-            ffmpeg,
-            "-hide_banner",
-            "-y",
-            "-i",
-            "pipe:0",
-            "-map",
-            "0",
-            "-c",
-            "copy",
-            "-copy_unknown",
-            "-f",
-            "mpegts",
-            "-mpegts_flags",
-            "resend_headers",
-            str(temp_path),
-        ]
-
+        sequence = 0
+        retry_count = 0
+        offline_count = 0
+        current_live = live
         try:
-            active.stream_process = await asyncio.create_subprocess_exec(
-                *streamlink_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name != "nt"),
-            )
-            active.ffmpeg_process = await asyncio.create_subprocess_exec(
-                *ffmpeg_cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=(os.name != "nt"),
-            )
-            if active.stream_process.stdout is None or active.ffmpeg_process.stdin is None:
-                raise RuntimeError("recording process pipes were not created")
+            while not stop_event.is_set():
+                sequence += 1
+                segment_started = now_kst()
+                segment_base = f"{base}.segment-{sequence:03d}"
+                segment_temp = config.TEMP_DIR / f"{segment_base}.ts.part"
+                segment_jsonl = config.TEMP_DIR / f"{segment_base}.chat.jsonl.part"
+                segment_csv = config.TEMP_DIR / f"{segment_base}.chat.csv.part"
+                db.execute(
+                    """UPDATE recording_sessions
+                       SET temp_path=?, chat_jsonl_temp_path=?, chat_csv_temp_path=?, status='recording'
+                       WHERE id=?""",
+                    (str(segment_temp), str(segment_jsonl), str(segment_csv), session_id),
+                )
+                source, error = await self._capture_segment(
+                    active, channel, current_live, tokens, twitcasting_token,
+                    segment_temp, segment_jsonl, segment_csv, segment_started,
+                )
+                final_segment_jsonl = self._finish_part(segment_jsonl)
+                final_segment_csv = self._finish_part(segment_csv, csv_file=True)
+                duration = await self._probe_duration(source) if source else None
+                db.add_recording_segment(
+                    session_id, sequence, source, final_segment_jsonl, final_segment_csv,
+                    kst_iso(segment_started), duration_seconds=duration,
+                    has_video=bool(source), error=error,
+                )
+                if source:
+                    retry_count = 0
+                    db.execute(
+                        "UPDATE recording_sessions SET status='recording', retry_count=0, next_retry_at=NULL, error=NULL WHERE id=?",
+                        (session_id,),
+                    )
+                else:
+                    retry_count += 1
+                    delay = config.RECORDING_RETRY_DELAYS[min(retry_count - 1, len(config.RECORDING_RETRY_DELAYS) - 1)]
+                    db.update_recording_retry(session_id, retry_count, delay, error or "No recording file was created")
+                    logger.warning("Recording produced no output for %s; retrying in %ss", channel_name, delay)
 
-            tasks = [
-                asyncio.create_task(pipe_stream(active.stream_process.stdout, active.ffmpeg_process.stdin)),
-                asyncio.create_task(log_process_stderr(active.stream_process.stderr, f"streamlink {channel_id}")),
-                asyncio.create_task(log_process_stderr(active.ffmpeg_process.stderr, f"ffmpeg {channel_id}")),
-                asyncio.create_task(active.stream_process.wait()),
-                asyncio.create_task(active.ffmpeg_process.wait()),
-                asyncio.create_task(stop_event.wait()),
-            ]
-            done, pending = await asyncio.wait(tasks[3:], return_when=asyncio.FIRST_COMPLETED)
-            if tasks[5] in done:
-                await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
-                await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
-            elif tasks[3] in done:
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(tasks[4], timeout=30)
-                await terminate_process(active.ffmpeg_process, "ffmpeg")
-            elif tasks[4] in done:
-                await terminate_process(active.stream_process, "streamlink")
+                while not stop_event.is_set():
+                    await asyncio.sleep(config.POLL_INTERVAL_SECONDS)
+                    try:
+                        latest = await get_live_info(channel, db.get_tokens(), db.get_twitcasting_token())
+                    except NETWORK_ERRORS as exc:
+                        if self._should_log_network_error(channel_id):
+                            logger.warning("Temporary network error while confirming broadcast end for %s: %s", channel_id, exc)
+                        continue
+                    if latest and latest.live_id == live_id:
+                        offline_count = 0
+                        current_live = latest
+                        if not source:
+                            delay = config.RECORDING_RETRY_DELAYS[min(retry_count - 1, len(config.RECORDING_RETRY_DELAYS) - 1)]
+                            await self._sleep_until_stop(stop_event, max(0, delay - config.POLL_INTERVAL_SECONDS))
+                        break
+                    offline_count += 1
+                    if offline_count >= config.OFFLINE_CONFIRMATION_COUNT:
+                        stop_event.set()
+                        break
 
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-            if temp_path.exists() and temp_path.stat().st_size > 0:
-                source_path = unique_path(source_path)
-                temp_path.replace(source_path)
-                db.finish_session(session_id, source_path, "queued")
-                session = db.get_session(session_id) or {}
-                target_final_path = Path(session["final_path"]) if session.get("final_path") else final_path
-                db.add_encode_job(session_id, source_path, target_final_path)
-                logger.info("Recording queued for encoding: %s", source_path)
-            else:
-                db.finish_session(session_id, None, "failed")
-                db.update_session_status(session_id, "failed", error="No recording file was created")
-                logger.warning("Recording produced no output for %s", channel_name)
+            await self._finalize_logical_session(session_id, final_path, chat_jsonl_path, chat_csv_path)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             db.update_session_status(session_id, "failed", error=str(exc))
             logger.exception("Recording failed for %s: %s", channel_name, exc)
         finally:
-            stopped_by_request = stop_event.is_set()
             stop_event.set()
+            await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
+            await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
+            self.active.pop(session_id, None)
+
+    async def _capture_segment(
+        self, active: ActiveRecording, channel: dict[str, Any], live: Any,
+        tokens: dict[str, str], twitcasting_token: str, temp_path: Path,
+        chat_jsonl_path: Path, chat_csv_path: Path, started_at: datetime,
+    ) -> tuple[Path | None, str | None]:
+        streamlink = shutil.which("streamlink")
+        ffmpeg = shutil.which("ffmpeg")
+        if not streamlink or not ffmpeg:
+            raise RuntimeError("streamlink or ffmpeg is not installed")
+        segment_stop = asyncio.Event()
+        chat_capture = create_chat_capture(
+            channel, live, tokens, twitcasting_token, chat_jsonl_path, chat_csv_path, started_at,
+        )
+        chat_task = asyncio.create_task(chat_capture.run(segment_stop.is_set)) if chat_capture else None
+        error: str | None = None
+        try:
+            active.stream_process = await asyncio.create_subprocess_exec(
+                *build_streamlink_command(streamlink, ffmpeg, live), stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, start_new_session=(os.name != "nt"),
+            )
+            active.ffmpeg_process = await asyncio.create_subprocess_exec(
+                ffmpeg, "-hide_banner", "-y", "-i", "pipe:0", "-map", "0", "-c", "copy",
+                "-copy_unknown", "-f", "mpegts", "-mpegts_flags", "resend_headers", str(temp_path),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE, start_new_session=(os.name != "nt"),
+            )
+            if active.stream_process.stdout is None or active.ffmpeg_process.stdin is None:
+                raise RuntimeError("recording process pipes were not created")
+            pipe_task = asyncio.create_task(pipe_stream(active.stream_process.stdout, active.ffmpeg_process.stdin))
+            stream_log = asyncio.create_task(log_process_stderr(active.stream_process.stderr, "streamlink"))
+            ffmpeg_log = asyncio.create_task(log_process_stderr(active.ffmpeg_process.stderr, "ffmpeg"))
+            waits = [
+                asyncio.create_task(active.stream_process.wait()),
+                asyncio.create_task(active.ffmpeg_process.wait()),
+                asyncio.create_task(active.stop_event.wait()),
+            ]
+            done, _ = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+            if waits[2] in done:
+                await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
+                await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
+            elif waits[0] in done:
+                await terminate_process(active.ffmpeg_process, "ffmpeg")
+            else:
+                await terminate_process(active.stream_process, "streamlink")
+            for task in waits:
+                if not task.done(): task.cancel()
+            await asyncio.gather(pipe_task, stream_log, ffmpeg_log, *waits, return_exceptions=True)
+        except Exception as exc:
+            error = str(exc)
+            logger.warning("Recording segment failed: %s", exc)
+        finally:
+            segment_stop.set()
             if chat_task:
                 chat_task.cancel()
                 await asyncio.gather(chat_task, return_exceptions=True)
-            try:
-                moved = db.finalize_session_chat_files(session_id)
-                if moved["jsonl"] or moved["csv"]:
-                    logger.info("Chat files finalized for session %s", session_id)
-            except Exception as exc:
-                logger.warning("Chat file finalization failed for session %s: %s", session_id, exc)
-            await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=not stopped_by_request)
-            await terminate_process(active.stream_process, "streamlink", warn_on_kill=not stopped_by_request)
-            self.active.pop(session_id, None)
+        if temp_path.exists() and temp_path.stat().st_size > 0:
+            source = unique_path(temp_path.with_suffix(""))
+            temp_path.replace(source)
+            return source, error
+        temp_path.unlink(missing_ok=True)
+        return None, error or "No recording file was created"
+
+    async def _probe_duration(self, path: Path) -> float | None:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            return None
+        try:
+            return float(stdout.decode().strip()) if process.returncode == 0 else None
+        except ValueError:
+            return None
+
+    def _finish_part(self, path: Path, *, csv_file: bool = False) -> Path | None:
+        if not path.exists() or path.stat().st_size == 0:
+            path.unlink(missing_ok=True)
+            return None
+        if csv_file:
+            with path.open("r", encoding="utf-8-sig", errors="ignore") as handle:
+                if sum(1 for line in handle if line.strip()) <= 1:
+                    path.unlink(missing_ok=True)
+                    return None
+        target = path.with_suffix("")
+        path.replace(target)
+        return target
+
+    async def _sleep_until_stop(self, stop_event: asyncio.Event, seconds: float) -> None:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    async def _finalize_logical_session(
+        self, session_id: int, final_path: Path, chat_jsonl_path: Path, chat_csv_path: Path,
+    ) -> None:
+        session = db.get_session(session_id) or {}
+        final_path = Path(session.get("final_path") or final_path)
+        chat_jsonl_path = Path(session.get("chat_jsonl_path") or chat_jsonl_path)
+        chat_csv_path = Path(session.get("chat_csv_path") or chat_csv_path)
+        segments = db.recording_segments(session_id)
+        video_segments = [Path(row["source_path"]) for row in segments if row.get("has_video") and row.get("source_path")]
+        self._merge_segment_chats(segments, chat_jsonl_path, chat_csv_path)
+        if not video_segments:
+            db.finish_session(session_id, None, "failed")
+            db.update_session_status(session_id, "failed", error="No recording file was created")
+            return
+        if len(video_segments) == 1:
+            source_path = video_segments[0]
+        else:
+            source_path = config.TEMP_DIR / f"session-{session_id}.concat"
+            lines = ["ffconcat version 1.0"]
+            for path in video_segments:
+                escaped = str(path).replace("'", "'\\''")
+                lines.append(f"file '{escaped}'")
+            source_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        db.finish_session(session_id, source_path, "queued")
+        db.add_encode_job(session_id, source_path, final_path)
+        logger.info("Recording session %s queued with %s segment(s)", session_id, len(video_segments))
+
+    def _merge_segment_chats(self, segments: list[dict[str, Any]], jsonl_path: Path, csv_path: Path) -> None:
+        rows: list[dict[str, Any]] = []
+        elapsed = 0.0
+        for segment in segments:
+            path = Path(segment["chat_jsonl_path"]) if segment.get("chat_jsonl_path") else None
+            segment_rows: list[dict[str, Any]] = []
+            if path and path.exists():
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for line in handle:
+                        try: segment_rows.append(json.loads(line))
+                        except json.JSONDecodeError: continue
+            has_video = bool(segment.get("has_video"))
+            for row in segment_rows:
+                if has_video:
+                    try: row["offset_seconds"] = round(elapsed + float(row.get("offset_seconds") or 0), 3)
+                    except (TypeError, ValueError): row["offset_seconds"] = elapsed
+                else:
+                    row["offset_seconds"] = None
+                rows.append(row)
+            if has_video:
+                elapsed += float(segment.get("duration_seconds") or 0)
+        if rows:
+            jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            with jsonl_path.open("w", encoding="utf-8") as handle:
+                for row in rows: handle.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=STANDARD_CSV_FIELDS)
+                writer.writeheader()
+                for row in rows: writer.writerow({key: row.get(key, "") for key in STANDARD_CSV_FIELDS})
+        for segment in segments:
+            for key in ("chat_jsonl_path", "chat_csv_path"):
+                if segment.get(key):
+                    Path(segment[key]).unlink(missing_ok=True)

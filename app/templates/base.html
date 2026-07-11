@@ -13,16 +13,17 @@
       })();
     </script>
     <link rel="stylesheet" href="/static/styles.css">
-    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <script src="/static/htmx-2.0.4.min.js" defer></script>
   </head>
   <body>
     <header class="topbar">
       <div>
         <h1>ChzzkBackup</h1>
-        <p>0.2.1 · local dashboard</p>
+        <p>{{ version }} · Tailscale dashboard</p>
       </div>
       <div class="topbar-actions">
-        <div class="endpoint">0.0.0.0:8733</div>
+        <nav><a href="/">운영</a><a href="/library">보관함</a></nav>
+        <div class="endpoint">100.105.18.90:8733</div>
         <button type="button" id="theme-toggle" class="theme-toggle">다크</button>
       </div>
     </header>

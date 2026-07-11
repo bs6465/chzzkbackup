@@ -301,7 +301,7 @@ wheels = [
 
 [[package]]
 name = "chzzkbackup"
-version = "0.2.2"
+version = "0.3.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiofiles" },

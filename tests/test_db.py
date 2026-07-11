@@ -1,4 +1,5 @@
 import sqlite3
+from pathlib import Path
 
 from app.db import Database
 
@@ -273,6 +274,30 @@ def test_recover_interrupted_sessions_queues_existing_temp_file(tmp_path, monkey
     assert (tmp_path / "final" / "Streamer" / "채팅" / "chat.csv").exists()
 
 
+def test_recover_interrupted_segment_session_builds_concat_job(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    current = tmp_path / "current.ts.part"
+    current.write_bytes(b"second")
+    final = tmp_path / "final.mp4"
+    session_id = database.create_session(
+        "abc123", "Streamer", "live-1", "Title", "2026-06-07T10:00:00+09:00",
+        current, tmp_path / "chat.jsonl", tmp_path / "chat.csv", final_path=final,
+    )
+    first = tmp_path / "first.ts"
+    first.write_bytes(b"first")
+    database.add_recording_segment(
+        session_id, 1, first, None, None, "2026-06-07T10:00:00+09:00", has_video=True,
+    )
+
+    assert database.recover_interrupted_sessions() == {"queued": 1, "failed": 0}
+    job = database.query_one("SELECT * FROM encode_jobs WHERE session_id=?", (session_id,))
+    assert job["source_path"].endswith(".concat")
+    manifest = Path(job["source_path"]).read_text(encoding="utf-8")
+    assert str(first) in manifest
+    assert "current.ts" in manifest
+
+
 def test_recover_interrupted_encode_jobs_requeues_when_source_exists(tmp_path):
     database = Database(tmp_path / "test.sqlite3")
     source_path = tmp_path / "source.ts"
@@ -371,6 +396,25 @@ def test_update_encode_progress(tmp_path):
     assert job["speed"] == "2x"
     assert job["eta_seconds"] == 37.5
     assert job["progress_updated_at"]
+
+
+def test_encode_retry_is_delayed_and_counted(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("abc123", "Streamer")
+    session_id = database.create_session(
+        "abc123", "Streamer", "live-1", "Title", "2026-06-07T10:00:00+09:00",
+        tmp_path / "recording.ts.part", tmp_path / "chat.jsonl", tmp_path / "chat.csv",
+    )
+    source = tmp_path / "source.ts"
+    source.write_bytes(b"video")
+    job_id = database.add_encode_job(session_id, source, tmp_path / "out.mp4")
+
+    assert database.schedule_encode_retry(job_id, session_id, "temporary", 60) == 1
+    job = database.query_one("SELECT * FROM encode_jobs WHERE id=?", (job_id,))
+    assert job["status"] == "queued"
+    assert job["retry_count"] == 1
+    assert job["next_retry_at"]
+    assert database.next_encode_job() is None
 
 
 def test_rename_recording_session_updates_recording_final_paths_without_temp_move(tmp_path):

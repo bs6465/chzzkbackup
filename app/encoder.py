@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import shlex
 from collections import deque
 from pathlib import Path
 
+from . import config
 from .db import db
 from .logger import logger
 
@@ -54,6 +56,7 @@ def calculate_progress(
 
 
 def build_x264_mp4_command(source_path: Path, final_path: Path) -> list[str]:
+    input_args = ["-f", "concat", "-safe", "0", "-i", str(source_path)] if source_path.suffix == ".concat" else ["-i", str(source_path)]
     return [
         "ffmpeg",
         "-hide_banner",
@@ -61,8 +64,7 @@ def build_x264_mp4_command(source_path: Path, final_path: Path) -> list[str]:
         "-nostats",
         "-progress",
         "pipe:2",
-        "-i",
-        str(source_path),
+        *input_args,
         "-map",
         "0",
         "-c:v",
@@ -82,6 +84,10 @@ def build_x264_mp4_command(source_path: Path, final_path: Path) -> list[str]:
 
 
 async def probe_duration_seconds(source_path: Path) -> float | None:
+    if source_path.suffix == ".concat":
+        durations = [await probe_duration_seconds(path) for path in read_concat_sources(source_path)]
+        valid = [value for value in durations if value]
+        return sum(valid) if valid else None
     process = await asyncio.create_subprocess_exec(
         "ffprobe",
         "-v",
@@ -94,7 +100,12 @@ async def probe_duration_seconds(source_path: Path) -> float | None:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
     )
-    stdout, _ = await process.communicate()
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        return None
     if process.returncode != 0:
         return None
     try:
@@ -102,6 +113,21 @@ async def probe_duration_seconds(source_path: Path) -> float | None:
     except ValueError:
         return None
     return duration if duration > 0 else None
+
+
+def read_concat_sources(manifest: Path) -> list[Path]:
+    if not manifest.exists():
+        return []
+    paths: list[Path] = []
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("file "):
+            continue
+        try:
+            value = shlex.split(line)[1]
+        except (ValueError, IndexError):
+            continue
+        paths.append(Path(value))
+    return paths
 
 
 async def read_encode_progress(
@@ -237,13 +263,38 @@ class EncodeWorker:
                     raise RuntimeError("ffmpeg completed but final file is missing or empty")
 
                 final_path = db.finalize_encode_output(job_id, final_path)
+                if source_path.suffix == ".concat":
+                    for segment_path in read_concat_sources(source_path):
+                        segment_path.unlink(missing_ok=True)
                 source_path.unlink(missing_ok=True)
                 db.update_encode_job(job_id, "completed")
                 db.update_session_status(session_id, "completed", final_path=final_path)
+                session = db.get_session(session_id) or {}
+                db.upsert_media_item(
+                    video_path=final_path,
+                    session_id=session_id,
+                    platform=str(session.get("platform") or "chzzk"),
+                    channel_name=str(session.get("channel_name") or final_path.parent.name),
+                    title=str(session.get("live_title") or final_path.stem),
+                    started_at=str(session.get("started_at") or session.get("ended_at") or ""),
+                    chat_jsonl_path=Path(session["chat_jsonl_path"]) if session.get("chat_jsonl_path") else None,
+                    chat_csv_path=Path(session["chat_csv_path"]) if session.get("chat_csv_path") else None,
+                    duration_seconds=duration_seconds,
+                    size_bytes=final_path.stat().st_size,
+                )
                 logger.info("Encoding completed: %s", final_path)
             except Exception as exc:
-                db.update_encode_job(job_id, "failed", str(exc))
-                db.update_session_status(session_id, "failed", error=str(exc))
-                logger.exception("Encoding failed for job %s: %s", job_id, exc)
+                retry_count = int(job.get("retry_count") or 0)
+                if retry_count < len(config.ENCODE_RETRY_DELAYS) and source_path.exists():
+                    delay = config.ENCODE_RETRY_DELAYS[retry_count]
+                    attempt = db.schedule_encode_retry(job_id, session_id, str(exc), delay)
+                    logger.warning(
+                        "Encoding failed for job %s; automatic retry %s/%s in %ss: %s",
+                        job_id, attempt, len(config.ENCODE_RETRY_DELAYS), delay, exc,
+                    )
+                else:
+                    db.update_encode_job(job_id, "failed", str(exc))
+                    db.update_session_status(session_id, "failed", error=str(exc))
+                    logger.exception("Encoding failed for job %s after retries: %s", job_id, exc)
             finally:
                 self._process = None

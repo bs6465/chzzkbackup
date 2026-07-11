@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="page-heading"><div><a href="/library">← 보관함</a><h2>{{ item.title }}</h2><p class="muted">{{ item.channel_name }} · {{ item.started_at|kst_datetime }}</p></div><a class="button-link" href="/media/{{ item.id }}/download">원본 다운로드</a></section>
+<section class="player-layout">
+  <div class="video-panel"><video id="player" controls preload="metadata" src="/media/{{ item.id }}/video"></video>
+    <form class="inline-form rename-player" method="post" action="/media/{{ item.id }}/rename"><input name="title" value="{{ item.title }}" required><button>제목·파일명 변경</button></form>
+  </div>
+  <aside class="chat-panel">
+    <div class="chat-toolbar"><input id="chat-search" placeholder="닉네임·내용 검색"><label><input id="auto-scroll" type="checkbox" checked> 자동 스크롤</label></div>
+    <div id="chat-types" class="type-filters"></div><div id="chat-list" class="chat-timeline"><p class="muted">채팅을 불러오는 중…</p></div>
+  </aside>
+</section>
+<script>window.CHZZK_MEDIA_ID={{ item.id }};</script><script src="/static/player.js"></script>
+{% endblock %}

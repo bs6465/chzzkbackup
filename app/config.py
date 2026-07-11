@@ -18,6 +18,12 @@ DISK_WARN_BYTES = int(os.getenv("DISK_WARN_BYTES", str(100 * 1024**3)))
 LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
 LOG_RETENTION_MAX_ROWS = int(os.getenv("LOG_RETENTION_MAX_ROWS", "1000"))
 FAILED_TEMP_RETENTION_DAYS = 7
+MEDIA_INDEX_INTERVAL_SECONDS = int(os.getenv("MEDIA_INDEX_INTERVAL_SECONDS", "3600"))
+MEDIA_PAGE_SIZE = 24
+RECORDING_RETRY_DELAYS = (10, 30, 60, 120, 300)
+OFFLINE_CONFIRMATION_COUNT = 3
+ENCODE_RETRY_DELAYS = (60, 300, 900)
+DB_BACKUP_KEEP = 5
 
 LIVE_DETAIL_API = "https://api.chzzk.naver.com/service/v3/channels/{channel_id}/live-detail"
 CHANNEL_API = "https://api.chzzk.naver.com/service/v1/channels/{channel_id}"

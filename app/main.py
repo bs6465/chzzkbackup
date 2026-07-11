@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -14,6 +14,7 @@ from .db import db
 from .encoder import EncodeWorker
 from .logger import logger
 from .maintenance import MaintenanceWorker
+from .media_library import MediaIndexer, load_chat_rows, rename_media_item, within_final_root
 from .platforms import get_channel_name, normalize_channel_input, platform_label, supported_platforms
 from .recorder import RecorderSupervisor
 from .twitcasting_api import test_token as test_twitcasting_token
@@ -36,6 +37,7 @@ templates.env.filters["platform_label"] = platform_label
 recorder = RecorderSupervisor()
 encoder = EncodeWorker()
 maintenance = MaintenanceWorker()
+media_indexer = MediaIndexer()
 
 
 @asynccontextmanager
@@ -44,6 +46,16 @@ async def lifespan(_: FastAPI):
     config.TEMP_DIR.mkdir(parents=True, exist_ok=True)
     config.FINAL_ROOT.mkdir(parents=True, exist_ok=True)
     recovered_sessions = db.recover_interrupted_sessions()
+    for session in db.query_all(
+        "SELECT * FROM recording_sessions WHERE status IN ('queued','failed') AND EXISTS (SELECT 1 FROM recording_segments WHERE session_id=recording_sessions.id)"
+    ):
+        try:
+            recorder._merge_segment_chats(
+                db.recording_segments(int(session["id"])),
+                Path(session["chat_jsonl_path"]), Path(session["chat_csv_path"]),
+            )
+        except Exception as exc:
+            logger.warning("Recovered chat merge failed for session %s: %s", session["id"], exc)
     recovered_jobs = db.recover_interrupted_encode_jobs()
     if any(recovered_sessions.values()):
         logger.warning("Recovered interrupted recording session(s): %s", recovered_sessions)
@@ -52,6 +64,7 @@ async def lifespan(_: FastAPI):
     recorder.start()
     encoder.start()
     maintenance.start()
+    media_indexer.start()
     logger.info("ChzzkBackup started")
     try:
         yield
@@ -59,6 +72,7 @@ async def lifespan(_: FastAPI):
         await recorder.stop()
         await encoder.stop()
         await maintenance.stop()
+        await media_indexer.stop()
         logger.info("ChzzkBackup stopped")
 
 
@@ -68,7 +82,19 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "version": __version__}
+    storage_ok = config.FINAL_ROOT.exists() and config.TEMP_DIR.exists()
+    return {
+        "ok": storage_ok,
+        "version": __version__,
+        "workers": {
+            "recorder": bool(recorder._task and not recorder._task.done()),
+            "encoder": bool(encoder._task and not encoder._task.done()),
+            "maintenance": bool(maintenance._task and not maintenance._task.done()),
+            "indexer": bool(media_indexer._task and not media_indexer._task.done()),
+        },
+        "storage": {"ok": storage_ok},
+        "indexer": media_indexer.status(),
+    }
 
 
 def status_context() -> dict:
@@ -88,6 +114,9 @@ def status_context() -> dict:
         "temp_disk": disk_status(config.TEMP_DIR),
         "final_disk": disk_status(config.FINAL_ROOT),
         "config": config,
+        "media_summary": db.media_summary(),
+        "indexer_status": media_indexer.status(),
+        "version": __version__,
     }
 
 
@@ -98,6 +127,95 @@ async def index(request: Request):
         "index.html",
         {**status_context(), "logs": db.recent_logs(30)},
     )
+
+
+@app.get("/library", response_class=HTMLResponse)
+async def library(
+    request: Request,
+    q: str = "",
+    platform: str = "",
+    channel: str = "",
+    date_from: str = "",
+    date_to: str = "",
+    sort: str = "desc",
+    page: int = 1,
+):
+    page = max(1, page)
+    items, total = db.list_media(
+        q=q.strip(), platform=platform, channel=channel, date_from=date_from,
+        date_to=date_to, sort=sort, page=page,
+    )
+    pages = max(1, (total + config.MEDIA_PAGE_SIZE - 1) // config.MEDIA_PAGE_SIZE)
+    return templates.TemplateResponse(
+        request,
+        "library.html",
+        {
+            "items": items, "total": total, "page": page, "pages": pages,
+            "q": q, "platform": platform, "channel": channel,
+            "date_from": date_from, "date_to": date_to, "sort": sort,
+            "channels": db.media_channels(), "platforms": supported_platforms(),
+            "version": __version__,
+        },
+    )
+
+
+def available_media_or_404(media_id: int) -> dict:
+    item = db.get_media_item(media_id)
+    if not item or item.get("status") != "available":
+        raise HTTPException(status_code=404, detail="Media not found")
+    path = Path(item["video_path"])
+    if not within_final_root(path) or not path.is_file():
+        raise HTTPException(status_code=404, detail="Media file not found")
+    return item
+
+
+@app.get("/library/{media_id}", response_class=HTMLResponse)
+async def watch_media(request: Request, media_id: int):
+    item = available_media_or_404(media_id)
+    return templates.TemplateResponse(
+        request, "player.html", {"item": item, "version": __version__}
+    )
+
+
+@app.get("/media/{media_id}/video")
+async def media_video(media_id: int):
+    item = available_media_or_404(media_id)
+    return FileResponse(Path(item["video_path"]), media_type="video/mp4")
+
+
+@app.get("/media/{media_id}/download")
+async def media_download(media_id: int):
+    item = available_media_or_404(media_id)
+    path = Path(item["video_path"])
+    return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@app.get("/media/{media_id}/thumbnail")
+async def media_thumbnail(media_id: int):
+    item = available_media_or_404(media_id)
+    raw = item.get("thumbnail_path")
+    if not raw or not Path(raw).is_file():
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+    return FileResponse(Path(raw), media_type="image/webp")
+
+
+@app.get("/media/{media_id}/chat")
+async def media_chat(media_id: int):
+    item = available_media_or_404(media_id)
+    return JSONResponse(load_chat_rows(item))
+
+
+@app.post("/media/{media_id}/rename")
+async def rename_media(media_id: int, title: str = Form(...)):
+    available_media_or_404(media_id)
+    try:
+        renamed = rename_media_item(media_id, title)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not renamed:
+        raise HTTPException(status_code=404, detail="Media not found")
+    logger.info("Media renamed: %s -> %s", media_id, renamed["title"])
+    return RedirectResponse(f"/library/{media_id}", status_code=303)
 
 
 @app.get("/partials/status", response_class=HTMLResponse)
