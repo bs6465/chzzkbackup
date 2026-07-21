@@ -11,11 +11,9 @@
   {% include "partials/status.html" %}
 </div>
 
-<details class="settings-panel">
-  <summary>채널 및 토큰 설정</summary>
-<section class="grid settings-grid">
+<section class="grid channel-settings">
   <div class="panel">
-    <h2>채널</h2>
+    <h2>새 방송 채널 추가</h2>
     <form class="inline-form" method="post" action="/channels">
       <select name="platform" aria-label="platform">
         {% for platform in platforms %}
@@ -48,7 +46,11 @@
       {% endfor %}
     </div>
   </div>
+</section>
 
+<details class="settings-panel">
+  <summary>토큰 설정</summary>
+<section class="grid settings-grid">
   <div class="panel">
     <h2>치지직 토큰</h2>
     <form method="post" action="/tokens" class="stack">

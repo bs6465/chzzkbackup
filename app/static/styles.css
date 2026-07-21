@@ -103,6 +103,7 @@ main {
 .summary-card strong { font-size: 28px; }
 .summary-card span { color: var(--muted); }
 .summary-card.warn { border-left-color: var(--warn); }
+.channel-settings { margin-top: 16px; }
 .settings-panel { margin: 16px 0; }
 .settings-panel > summary { cursor: pointer; font-weight: 700; padding: 14px 0; }
 .settings-grid { margin-top: 4px; }
