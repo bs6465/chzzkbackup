@@ -1,4 +1,4 @@
-<section class="grid">
+<section class="grid operations-grid">
   <div class="panel">
     <h2>녹화 중</h2>
     <div class="list">
@@ -29,7 +29,14 @@
       {% for job in encode_jobs %}
       <div class="row">
         <div>
-          <strong>#{{ job.id }} {{ job.status }}</strong>
+          <strong>
+            #{{ job.id }} ·
+            {% if job.status == "running" %}진행 중
+            {% elif job.status == "queued" %}대기
+            {% elif job.status == "failed" %}실패
+            {% else %}{{ job.status }}
+            {% endif %}
+          </strong>
           {% if job.platform %}<span>{{ job.platform|platform_label }} · {{ job.channel_name }}</span>{% endif %}
           {% if job.live_title %}<span>{{ job.live_title }}</span>{% endif %}
           <span>{{ job.final_path }}</span>
@@ -55,7 +62,7 @@
         </form>
       </div>
       {% else %}
-      <p class="muted">인코딩 작업이 없습니다.</p>
+      <p class="muted">대기·진행·실패 작업이 없습니다.</p>
       {% endfor %}
     </div>
   </div>
@@ -82,25 +89,4 @@
     </div>
   </div>
 
-  <div class="panel">
-    <h2>최근 세션</h2>
-    <div class="list compact">
-      {% for session in recent_sessions %}
-      <div class="row">
-        <div>
-          <strong>{{ session.platform|platform_label }} · {{ session.channel_name }} · {{ session.status }}</strong>
-          <span>{{ session.live_title }}</span>
-          {% if session.final_path %}<span>{{ session.final_path }}</span>{% endif %}
-          {% if session.error %}<span class="error">{{ session.error }}</span>{% endif %}
-        </div>
-        <form method="post" action="/recordings/{{ session.id }}/rename" class="rename">
-          <input name="title" value="{{ session.live_title }}">
-          <button type="submit">제목</button>
-        </form>
-      </div>
-      {% else %}
-      <p class="muted">세션 이력이 없습니다.</p>
-      {% endfor %}
-    </div>
-  </div>
 </section>

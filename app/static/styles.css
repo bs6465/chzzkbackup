@@ -167,11 +167,79 @@ main {
   margin-bottom: 16px;
 }
 
+.operations-grid {
+  align-items: start;
+}
+
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 16px;
+}
+
+.recent-work {
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.recent-work > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.recent-work > summary small {
+  margin-left: auto;
+}
+
+.recent-work > summary::after {
+  content: "▾";
+  color: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.recent-work[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.recent-work[open] > summary::after {
+  transform: rotate(180deg);
+}
+
+.recent-work-list {
+  padding: 0 16px 16px;
+}
+
+.recent-work-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.status-badge {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 7px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-badge.status-completed {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.status-badge.status-failed {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .inline-form,

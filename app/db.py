@@ -1186,6 +1186,26 @@ class Database:
             (limit,),
         )
 
+    def recent_completed_sessions(self, limit: int = 5) -> list[dict[str, Any]]:
+        return self.query_all(
+            """
+            SELECT recording_sessions.*,
+                   (
+                     SELECT MAX(encode_jobs.finished_at)
+                     FROM encode_jobs
+                     WHERE encode_jobs.session_id = recording_sessions.id
+                       AND encode_jobs.status = 'completed'
+                   ) AS completed_at
+            FROM recording_sessions
+            WHERE recording_sessions.status = 'completed'
+            ORDER BY
+              COALESCE(completed_at, recording_sessions.ended_at, recording_sessions.started_at) DESC,
+              recording_sessions.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
     def encode_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
         return self.query_all(
             """
@@ -1196,6 +1216,28 @@ class Database:
             FROM encode_jobs
             LEFT JOIN recording_sessions ON recording_sessions.id = encode_jobs.session_id
             ORDER BY encode_jobs.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+
+    def operational_encode_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
+        return self.query_all(
+            """
+            SELECT encode_jobs.*,
+                   recording_sessions.live_title,
+                   recording_sessions.channel_name,
+                   recording_sessions.platform
+            FROM encode_jobs
+            LEFT JOIN recording_sessions ON recording_sessions.id = encode_jobs.session_id
+            WHERE encode_jobs.status IN ('queued', 'running', 'failed')
+            ORDER BY
+              CASE encode_jobs.status
+                WHEN 'running' THEN 0
+                WHEN 'queued' THEN 1
+                ELSE 2
+              END,
+              encode_jobs.id DESC
             LIMIT ?
             """,
             (limit,),

@@ -119,8 +119,8 @@ def status_context() -> dict:
     return {
         "channels": db.get_channels(),
         "active_sessions": db.active_sessions(),
-        "recent_sessions": db.recent_sessions(),
-        "encode_jobs": db.encode_jobs(),
+        "recent_sessions": db.recent_completed_sessions(),
+        "encode_jobs": db.operational_encode_jobs(),
         "tokens_masked": {
             "NID_SES": mask_secret(tokens.get("NID_SES")),
             "NID_AUT": mask_secret(tokens.get("NID_AUT")),
@@ -531,6 +531,15 @@ async def partial_media_clips(request: Request, media_id: int):
 @app.get("/partials/status", response_class=HTMLResponse)
 async def partial_status(request: Request):
     return templates.TemplateResponse(request, "partials/status.html", status_context())
+
+
+@app.get("/partials/recent-work", response_class=HTMLResponse)
+async def partial_recent_work(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "partials/recent_work.html",
+        {"recent_sessions": db.recent_completed_sessions()},
+    )
 
 
 @app.get("/partials/logs", response_class=HTMLResponse)

@@ -1,0 +1,25 @@
+<div class="list compact recent-work-list">
+  {% for session in recent_sessions %}
+  <div class="row">
+    <div>
+      <div class="recent-work-heading">
+        <strong>{{ session.platform|platform_label }} · {{ session.channel_name }}</strong>
+        <span class="status-badge status-{{ session.status }}">
+          {% if session.status == "completed" %}완료
+          {% elif session.status == "failed" %}실패
+          {% elif session.status == "recording" %}녹화 중
+          {% elif session.status == "queued" %}인코딩 대기
+          {% elif session.status == "retrying" %}재시도
+          {% else %}{{ session.status }}
+          {% endif %}
+        </span>
+      </div>
+      <span>{{ session.live_title }}</span>
+      <span>완료 {{ (session.completed_at or session.ended_at or session.started_at)|kst_datetime }}</span>
+      {% if session.error %}<span class="error">{{ session.error }}</span>{% endif %}
+    </div>
+  </div>
+  {% else %}
+  <p class="muted">최근 작업이 없습니다.</p>
+  {% endfor %}
+</div>

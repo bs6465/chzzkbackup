@@ -103,6 +103,44 @@ def test_twitcasting_channel_crud_stores_display_id(tmp_path):
     assert channel["display_id"] == "alice"
 
 
+def test_operational_encode_jobs_excludes_completed_and_prioritizes_active(tmp_path):
+    database = Database(tmp_path / "test.sqlite3")
+    database.upsert_channel("streamer-id", "Streamer", platform="chzzk")
+    paths = {
+        "temp_path": tmp_path / "recording.ts",
+        "chat_jsonl_path": tmp_path / "chat.jsonl",
+        "chat_csv_path": tmp_path / "chat.csv",
+    }
+    job_ids = {}
+
+    for status in ("completed", "failed", "queued", "running"):
+        session_id = database.create_session(
+            "streamer-id",
+            "Streamer",
+            f"live-{status}",
+            f"Title {status}",
+            "2026-07-27T10:00:00+09:00",
+            **paths,
+        )
+        job_id = database.add_encode_job(
+            session_id,
+            tmp_path / f"{status}.ts",
+            tmp_path / f"{status}.mp4",
+        )
+        database.update_encode_job(job_id, status, "failed" if status == "failed" else None)
+        job_ids[status] = job_id
+
+    jobs = database.operational_encode_jobs()
+
+    assert [job["status"] for job in jobs] == ["running", "queued", "failed"]
+    assert {job["id"] for job in jobs} == {
+        job_ids["running"],
+        job_ids["queued"],
+        job_ids["failed"],
+    }
+    assert job_ids["completed"] not in {job["id"] for job in jobs}
+
+
 def test_tokens(tmp_path):
     database = Database(tmp_path / "test.sqlite3")
     database.set_tokens("ses;bad", "aut\nbad")
