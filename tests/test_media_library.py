@@ -20,6 +20,9 @@ async def test_media_index_is_idempotent_and_tracks_missing(tmp_path, monkeypatc
     chat_dir.mkdir(parents=True)
     video = channel / "[260611 08-55-54] Streamer - Title.mp4"
     video.write_bytes(b"video")
+    trash_video = root / ".chzzkbackup-trash" / "99" / "video.mp4"
+    trash_video.parent.mkdir(parents=True)
+    trash_video.write_bytes(b"trashed")
     (chat_dir / "[260611 08-55-54] Streamer - Title.jsonl").write_text(
         json.dumps({"type": "chat", "timestamp": "now", "offset_seconds": 1, "nickname": "n", "content": "c"}) + "\n"
     )
@@ -101,7 +104,7 @@ def test_database_backs_up_legacy_schema(tmp_path):
 
     Database(path)
 
-    backups = list((tmp_path / "backups").glob("legacy-pre-v3-*.sqlite3"))
+    backups = list((tmp_path / "backups").glob("legacy-pre-v4-*.sqlite3"))
     assert len(backups) == 1
 
 

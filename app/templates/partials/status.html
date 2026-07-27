@@ -61,6 +61,12 @@
   </div>
 
   <div class="panel">
+    <h2>구간 다운로드 큐</h2>
+    {% set clip_next_url = '/' %}
+    {% include "partials/clip_jobs.html" %}
+  </div>
+
+  <div class="panel">
     <h2>디스크</h2>
     <div class="metrics">
       <div class="{{ 'warn' if temp_disk.warn else '' }}">

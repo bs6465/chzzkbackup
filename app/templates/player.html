@@ -4,6 +4,42 @@
 <section class="player-layout">
   <div class="video-panel"><video id="player" controls preload="metadata" src="/media/{{ item.id }}/video"></video>
     <form class="inline-form rename-player" method="post" action="/media/{{ item.id }}/rename"><input name="title" value="{{ item.title }}" required><button>제목·파일명 변경</button></form>
+    <section class="player-tools">
+      <h2>저장 정책</h2>
+      <form class="inline-form retention-override-form" method="post" action="/media/{{ item.id }}/retention">
+        <select name="retention_override">
+          <option value="inherit" {{ 'selected' if item.retention_override == 'inherit' else '' }}>채널 정책 상속</option>
+          <option value="forever" {{ 'selected' if item.retention_override == 'forever' else '' }}>무기한</option>
+          <option value="scheduled" {{ 'selected' if item.retention_override == 'scheduled' else '' }}>지정일까지 보호</option>
+        </select>
+        <input type="date" name="expires_on" value="{{ item.retention_expires_at[:10] if item.retention_expires_at else '' }}" aria-label="보호 종료일">
+        <button type="submit">정책 저장</button>
+      </form>
+      <p class="muted">
+        {% if item.retention.candidate %}현재 정리 대상 · {{ item.retention.reason }}
+        {% elif item.retention.override == "forever" %}이 영상은 무기한 보호됩니다.
+        {% elif item.retention.override == "scheduled" %}{{ item.retention.expires_at|kst_datetime }}까지 보호됩니다.
+        {% elif item.retention.category == "forever" %}채널 기본 정책이 무기한입니다.
+        {% else %}채널 기본 정책을 상속합니다.{% endif %}
+      </p>
+    </section>
+    <section class="player-tools" id="clip-controls">
+      <h2>구간 다운로드</h2>
+      <form class="clip-form" method="post" action="/media/{{ item.id }}/clips">
+        <label>시작
+          <span class="time-input"><input id="clip-start" name="start_time" value="00:00:00" inputmode="numeric" pattern="\d+:[0-5]\d:[0-5]\d" required><button type="button" id="mark-clip-start">현재 위치</button></span>
+        </label>
+        <label>끝
+          <span class="time-input"><input id="clip-end" name="end_time" value="00:00:01" inputmode="numeric" pattern="\d+:[0-5]\d:[0-5]\d" required><button type="button" id="mark-clip-end">현재 위치</button></span>
+        </label>
+        <button type="submit">고속 구간 생성</button>
+      </form>
+      <p class="muted">무인코딩 복사 방식이라 빠르지만 키프레임 위치에 따라 실제 시작·끝이 수초 달라질 수 있습니다. 결과는 24시간 보관됩니다.</p>
+      <div id="media-clip-jobs" hx-get="/partials/clips/{{ item.id }}" hx-trigger="every 3s" hx-swap="innerHTML">
+        {% set clip_next_url = "/library/" ~ item.id ~ "#clip-controls" %}
+        {% include "partials/clip_jobs.html" %}
+      </div>
+    </section>
   </div>
   <aside class="chat-panel">
     <div class="chat-toolbar"><input id="chat-search" placeholder="닉네임·내용 검색"><label><input id="auto-scroll" type="checkbox" checked> 자동 스크롤</label></div>

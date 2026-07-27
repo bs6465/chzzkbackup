@@ -1,0 +1,6 @@
+<span>
+  예상 정리 {{ preview.candidate_count }}개 · {{ preview.candidate_bytes|bytes }}
+  {% if preview.deferred_count %}
+  · 구간 작업으로 {{ preview.deferred_count }}개 보류
+  {% endif %}
+</span>

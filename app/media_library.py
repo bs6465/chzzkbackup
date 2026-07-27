@@ -142,6 +142,10 @@ class MediaIndexer:
                 if not path.is_file() or not within_final_root(path):
                     continue
                 resolved = path.resolve()
+                if config.TRASH_DIR_NAME in resolved.relative_to(
+                    config.FINAL_ROOT.resolve()
+                ).parts:
+                    continue
                 seen.add(str(resolved))
                 existing = db.query_one("SELECT * FROM media_items WHERE video_path = ?", (str(resolved),))
                 session = db.query_one(

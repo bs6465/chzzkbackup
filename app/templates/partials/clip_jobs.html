@@ -1,0 +1,36 @@
+<div class="list compact">
+  {% for job in clip_jobs %}
+  <div class="row">
+    <div>
+      <strong>#{{ job.id }} · {{ job.status }}</strong>
+      <span>{{ job.source_title }} · {{ job.start_seconds|duration }}~{{ job.end_seconds|duration }}</span>
+      {% if job.status in ["running", "completed"] %}
+      <div class="progress-line">
+        <progress max="100" value="{{ job.progress_percent or 0 }}"></progress>
+        <span>{{ "%.1f"|format(job.progress_percent or 0) }}%</span>
+      </div>
+      {% endif %}
+      {% if job.expires_at and job.status == "completed" %}
+      <span>{{ job.expires_at|kst_datetime }}까지 다운로드 가능</span>
+      {% endif %}
+      {% if job.error %}<span class="error">{{ job.error }}</span>{% endif %}
+    </div>
+    <div class="job-actions">
+      {% if job.status == "completed" %}
+      <a class="button-link" href="/clips/{{ job.id }}/download">다운로드</a>
+      <form method="post" action="/clips/{{ job.id }}/delete" onsubmit="return confirm('구간 파일을 즉시 삭제할까요?')">
+        <input type="hidden" name="next_url" value="{{ clip_next_url or '/' }}">
+        <button class="danger" type="submit">삭제</button>
+      </form>
+      {% elif job.status in ["queued", "running"] %}
+      <form method="post" action="/clips/{{ job.id }}/cancel" onsubmit="return confirm('구간 작업을 취소할까요?')">
+        <input type="hidden" name="next_url" value="{{ clip_next_url or '/' }}">
+        <button class="danger" type="submit">취소</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <p class="muted">구간 작업이 없습니다.</p>
+  {% endfor %}
+</div>

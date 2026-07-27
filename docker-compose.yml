@@ -1,6 +1,6 @@
 services:
   chzzkbackup:
-    image: chzzkbackup:0.3.1
+    image: chzzkbackup:0.4.0
     build:
       context: .
     container_name: chzzkbackup
@@ -13,6 +13,7 @@ services:
       FINAL_ROOT: /data/chzzk_backup
       POLL_INTERVAL_SECONDS: "10"
       DISK_WARN_BYTES: "107374182400"
+      CLIP_MIN_FREE_BYTES: "107374182400"
       LOG_RETENTION_MAX_ROWS: "1000"
     ports:
       - "100.105.18.90:8733:8733"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sqlite3
@@ -10,6 +11,8 @@ from typing import Any
 
 from . import config
 from .utils import ensure_storage_dirs, recording_name, sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
+
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -29,18 +32,21 @@ class Database:
         has_schema = self._conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recording_sessions'"
         ).fetchone()
-        if version >= 3 or not has_schema:
+        if version >= SCHEMA_VERSION or not has_schema:
             return
         backup_dir = self.path.parent / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        destination = backup_dir / f"{self.path.stem}-pre-v3-{stamp}.sqlite3"
+        destination = backup_dir / f"{self.path.stem}-pre-v{SCHEMA_VERSION}-{stamp}.sqlite3"
         backup = sqlite3.connect(destination)
         try:
             self._conn.backup(backup)
         finally:
             backup.close()
-        backups = sorted(backup_dir.glob(f"{self.path.stem}-pre-v3-*.sqlite3"), reverse=True)
+        backups = sorted(
+            backup_dir.glob(f"{self.path.stem}-pre-v{SCHEMA_VERSION}-*.sqlite3"),
+            reverse=True,
+        )
         for old in backups[config.DB_BACKUP_KEEP :]:
             old.unlink(missing_ok=True)
 
@@ -149,6 +155,66 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_media_started ON media_items(started_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_media_channel ON media_items(channel_name);
+
+                CREATE TABLE IF NOT EXISTS retention_policies (
+                  policy_key TEXT PRIMARY KEY,
+                  platform TEXT NOT NULL,
+                  channel_id TEXT,
+                  channel_name TEXT NOT NULL,
+                  retention_days INTEGER,
+                  max_items INTEGER,
+                  max_bytes INTEGER,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS media_trash (
+                  media_id INTEGER PRIMARY KEY,
+                  trash_video_path TEXT,
+                  trash_chat_jsonl_path TEXT,
+                  trash_chat_csv_path TEXT,
+                  trashed_at TEXT NOT NULL,
+                  purge_after TEXT NOT NULL,
+                  reason TEXT NOT NULL,
+                  FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS media_deletion_history (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  original_media_id INTEGER,
+                  platform TEXT NOT NULL,
+                  channel_name TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  started_at TEXT NOT NULL,
+                  size_bytes INTEGER NOT NULL DEFAULT 0,
+                  reason TEXT NOT NULL,
+                  deleted_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS clip_jobs (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  media_id INTEGER,
+                  source_title TEXT NOT NULL,
+                  start_seconds INTEGER NOT NULL,
+                  end_seconds INTEGER NOT NULL,
+                  download_name TEXT NOT NULL,
+                  output_path TEXT,
+                  estimated_size_bytes INTEGER NOT NULL DEFAULT 0,
+                  output_size_bytes INTEGER,
+                  status TEXT NOT NULL,
+                  progress_percent REAL NOT NULL DEFAULT 0,
+                  error TEXT,
+                  retry_count INTEGER NOT NULL DEFAULT 0,
+                  created_at TEXT NOT NULL,
+                  started_at TEXT,
+                  finished_at TEXT,
+                  expires_at TEXT,
+                  updated_at TEXT NOT NULL,
+                  FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE SET NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_clip_jobs_status ON clip_jobs(status, id);
+                CREATE INDEX IF NOT EXISTS idx_clip_jobs_media ON clip_jobs(media_id, id DESC);
                 """
             )
             self._ensure_columns(
@@ -182,14 +248,111 @@ class Database:
                     "next_retry_at": "TEXT",
                 },
             )
+            self._ensure_columns(
+                "media_items",
+                {
+                    "retention_policy_key": "TEXT",
+                    "retention_override": "TEXT NOT NULL DEFAULT 'inherit'",
+                    "retention_expires_at": "TEXT",
+                },
+            )
+            self._ensure_columns(
+                "clip_jobs",
+                {
+                    "estimated_size_bytes": "INTEGER NOT NULL DEFAULT 0",
+                    "output_size_bytes": "INTEGER",
+                },
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_media_policy ON media_items(retention_policy_key)"
+            )
             self._conn.execute("UPDATE channels SET platform = 'chzzk' WHERE platform IS NULL")
             self._conn.execute("UPDATE channels SET display_id = id WHERE display_id IS NULL")
             self._conn.execute("UPDATE recording_sessions SET platform = 'chzzk' WHERE platform IS NULL")
             self._conn.execute(
                 "UPDATE recording_sessions SET channel_display_id = channel_id WHERE channel_display_id IS NULL"
             )
-            self._conn.execute("PRAGMA user_version = 3")
+            self._backfill_retention_policies()
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._chmod_private()
+
+    @staticmethod
+    def registered_policy_key(platform: str, channel_id: str) -> str:
+        return f"registered:{platform}:{channel_id}"
+
+    @staticmethod
+    def discovered_policy_key(platform: str, channel_name: str) -> str:
+        digest = hashlib.sha256(
+            f"{platform}\0{channel_name.casefold()}".encode("utf-8")
+        ).hexdigest()[:24]
+        return f"discovered:{platform}:{digest}"
+
+    def _ensure_retention_policy(
+        self,
+        policy_key: str,
+        platform: str,
+        channel_name: str,
+        channel_id: str | None = None,
+    ) -> None:
+        now = utc_now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO retention_policies
+              (policy_key, platform, channel_id, channel_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(policy_key) DO UPDATE SET
+              platform=excluded.platform,
+              channel_id=COALESCE(excluded.channel_id, retention_policies.channel_id),
+              channel_name=excluded.channel_name,
+              updated_at=excluded.updated_at
+            """,
+            (policy_key, platform, channel_id, channel_name, now, now),
+        )
+
+    def _backfill_retention_policies(self) -> None:
+        channels = self._conn.execute(
+            "SELECT id, platform, name FROM channels"
+        ).fetchall()
+        by_name: dict[tuple[str, str], sqlite3.Row] = {}
+        by_id: dict[str, sqlite3.Row] = {}
+        for channel in channels:
+            platform = str(channel["platform"] or "chzzk")
+            channel_id = str(channel["id"])
+            channel_name = str(channel["name"])
+            key = self.registered_policy_key(platform, channel_id)
+            self._ensure_retention_policy(key, platform, channel_name, channel_id)
+            by_name[(platform, channel_name.casefold())] = channel
+            by_id[channel_id] = channel
+
+        rows = self._conn.execute(
+            """
+            SELECT media_items.id, media_items.platform, media_items.channel_name,
+                   recording_sessions.channel_id AS session_channel_id
+            FROM media_items
+            LEFT JOIN recording_sessions ON recording_sessions.id = media_items.session_id
+            WHERE media_items.retention_policy_key IS NULL
+               OR media_items.retention_policy_key = ''
+            """
+        ).fetchall()
+        for row in rows:
+            platform = str(row["platform"] or "chzzk")
+            channel_name = str(row["channel_name"])
+            channel_id = row["session_channel_id"]
+            if not channel_id:
+                matched = by_name.get((platform, channel_name.casefold()))
+                channel_id = matched["id"] if matched else None
+            if channel_id:
+                key = self.registered_policy_key(platform, str(channel_id))
+                registered = by_id.get(str(channel_id))
+                policy_name = str(registered["name"]) if registered else channel_name
+                self._ensure_retention_policy(key, platform, policy_name, str(channel_id))
+            else:
+                key = self.discovered_policy_key(platform, channel_name)
+                self._ensure_retention_policy(key, platform, channel_name)
+            self._conn.execute(
+                "UPDATE media_items SET retention_policy_key = ? WHERE id = ?",
+                (key, int(row["id"])),
+            )
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
         existing = {
@@ -261,12 +424,38 @@ class Database:
             """,
             (channel_id, platform, display_id, name, int(active), now, now),
         )
+        policy_key = self.registered_policy_key(platform, channel_id)
+        with self._lock, self._conn:
+            self._ensure_retention_policy(policy_key, platform, name, channel_id)
+            self._conn.execute(
+                """
+                UPDATE media_items
+                SET retention_policy_key = ?
+                WHERE platform = ? AND channel_name = ? COLLATE NOCASE
+                """,
+                (policy_key, platform, name),
+            )
 
     def rename_channel(self, channel_id: str, name: str) -> None:
-        self.execute(
-            "UPDATE channels SET name = ?, updated_at = ? WHERE id = ?",
-            (name, utc_now_iso(), channel_id),
-        )
+        channel = self.get_channel(channel_id)
+        now = utc_now_iso()
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE channels SET name = ?, updated_at = ? WHERE id = ?",
+                (name, now, channel_id),
+            )
+            if channel:
+                policy_key = self.registered_policy_key(
+                    str(channel.get("platform") or "chzzk"), channel_id
+                )
+                self._conn.execute(
+                    """
+                    UPDATE retention_policies
+                    SET channel_name = ?, updated_at = ?
+                    WHERE policy_key = ?
+                    """,
+                    (name, now, policy_key),
+                )
 
     def set_channel_active(self, channel_id: str, active: bool) -> None:
         self.execute(
@@ -755,15 +944,30 @@ class Database:
         duration_seconds: float | None = None,
         size_bytes: int = 0,
         status: str = "available",
+        retention_policy_key: str | None = None,
     ) -> int:
         now = utc_now_iso()
+        if not retention_policy_key:
+            existing = self.query_one(
+                "SELECT retention_policy_key FROM media_items WHERE video_path = ?",
+                (str(video_path),),
+            )
+            retention_policy_key = (
+                str(existing["retention_policy_key"])
+                if existing and existing.get("retention_policy_key")
+                else self.resolve_retention_policy_key(
+                    platform=platform,
+                    channel_name=channel_name,
+                    session_id=session_id,
+                )
+            )
         self.execute(
             """
             INSERT INTO media_items
             (session_id, platform, channel_name, title, started_at, video_path,
              chat_jsonl_path, chat_csv_path, thumbnail_path, duration_seconds,
-             size_bytes, status, indexed_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             size_bytes, status, indexed_at, updated_at, retention_policy_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_path) DO UPDATE SET
               session_id = COALESCE(excluded.session_id, media_items.session_id),
               platform = excluded.platform, channel_name = excluded.channel_name,
@@ -773,6 +977,7 @@ class Database:
               thumbnail_path = COALESCE(excluded.thumbnail_path, media_items.thumbnail_path),
               duration_seconds = COALESCE(excluded.duration_seconds, media_items.duration_seconds),
               size_bytes = excluded.size_bytes, status = excluded.status,
+              retention_policy_key = COALESCE(media_items.retention_policy_key, excluded.retention_policy_key),
               updated_at = excluded.updated_at
             """,
             (
@@ -780,11 +985,51 @@ class Database:
                 str(chat_jsonl_path) if chat_jsonl_path else None,
                 str(chat_csv_path) if chat_csv_path else None,
                 str(thumbnail_path) if thumbnail_path else None,
-                duration_seconds, size_bytes, status, now, now,
+                duration_seconds, size_bytes, status, now, now, retention_policy_key,
             ),
         )
         row = self.query_one("SELECT id FROM media_items WHERE video_path = ?", (str(video_path),))
         return int(row["id"])
+
+    def resolve_retention_policy_key(
+        self,
+        *,
+        platform: str,
+        channel_name: str,
+        session_id: int | None = None,
+    ) -> str:
+        channel_id: str | None = None
+        policy_name = channel_name
+        if session_id is not None:
+            session = self.query_one(
+                "SELECT channel_id FROM recording_sessions WHERE id = ?",
+                (session_id,),
+            )
+            if session and session.get("channel_id"):
+                channel_id = str(session["channel_id"])
+        if not channel_id:
+            channel = self.query_one(
+                """
+                SELECT id FROM channels
+                WHERE platform = ? AND name = ? COLLATE NOCASE
+                ORDER BY id LIMIT 1
+                """,
+                (platform, channel_name),
+            )
+            if channel:
+                channel_id = str(channel["id"])
+        if channel_id:
+            registered = self.get_channel(channel_id)
+            if registered and registered.get("name"):
+                policy_name = str(registered["name"])
+            key = self.registered_policy_key(platform, channel_id)
+            with self._lock, self._conn:
+                self._ensure_retention_policy(key, platform, policy_name, channel_id)
+            return key
+        key = self.discovered_policy_key(platform, channel_name)
+        with self._lock, self._conn:
+            self._ensure_retention_policy(key, platform, channel_name)
+        return key
 
     def get_media_item(self, media_id: int) -> dict[str, Any] | None:
         return self.query_one("SELECT * FROM media_items WHERE id = ?", (media_id,))

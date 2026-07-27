@@ -4,6 +4,8 @@
   const search = document.getElementById("chat-search");
   const autoScroll = document.getElementById("auto-scroll");
   const filters = document.getElementById("chat-types");
+  const clipStart = document.getElementById("clip-start");
+  const clipEnd = document.getElementById("clip-end");
   let rows = [], enabled = new Set(), visible = [], active = -1;
   const fmt = value => { const n = Number(value || 0); return `${String(Math.floor(n / 60)).padStart(2,"0")}:${String(Math.floor(n % 60)).padStart(2,"0")}`; };
   const render = () => {
@@ -19,4 +21,13 @@
   search.addEventListener("input", render);
   list.addEventListener("click", event => { const button=event.target.closest("button[data-index]"); if(!button)return; const row=visible[Number(button.dataset.index)]; if(row.offset_seconds!=null){player.currentTime=row.offset_seconds; player.play();} });
   player.addEventListener("timeupdate", () => { let found=-1; for(let i=0;i<visible.length;i++){if(visible[i].offset_seconds!=null&&visible[i].offset_seconds<=player.currentTime)found=i;else if(visible[i].offset_seconds!=null)break;} if(found===active)return; list.querySelector(".current")?.classList.remove("current"); active=found; const element=list.querySelector(`[data-index='${found}']`); if(element){element.classList.add("current"); if(autoScroll.checked)element.scrollIntoView({block:"center"});} });
+  const fmtClip = value => {
+    const total = Math.max(0, Math.floor(Number(value) || 0));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const seconds = total % 60;
+    return `${String(hours).padStart(2,"0")}:${String(minutes).padStart(2,"0")}:${String(seconds).padStart(2,"0")}`;
+  };
+  document.getElementById("mark-clip-start")?.addEventListener("click", () => { clipStart.value = fmtClip(player.currentTime); });
+  document.getElementById("mark-clip-end")?.addEventListener("click", () => { clipEnd.value = fmtClip(player.currentTime); });
 })();

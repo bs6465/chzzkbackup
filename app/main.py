@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import re
 from contextlib import asynccontextmanager
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -10,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import __version__, config
 from .chzzk_api import test_tokens as test_chzzk_tokens
+from .clipper import InsufficientClipStorageError, clip_worker
 from .db import db
 from .encoder import EncodeWorker
 from .logger import logger
@@ -17,6 +21,7 @@ from .maintenance import MaintenanceWorker
 from .media_library import MediaIndexer, load_chat_rows, rename_media_item, within_final_root
 from .platforms import get_channel_name, normalize_channel_input, platform_label, supported_platforms
 from .recorder import RecorderSupervisor
+from .retention import parse_datetime, retention
 from .twitcasting_api import test_token as test_twitcasting_token
 from .utils import (
     disk_status,
@@ -26,6 +31,7 @@ from .utils import (
     kst_display,
     mask_secret,
     sanitize_name,
+    utc_now_iso,
 )
 
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parent / "templates"))
@@ -38,12 +44,14 @@ recorder = RecorderSupervisor()
 encoder = EncodeWorker()
 maintenance = MaintenanceWorker()
 media_indexer = MediaIndexer()
+CLIP_TIME_RE = re.compile(r"^(?P<hours>\d+):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d)$")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     config.APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
     config.TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    config.CLIP_TEMP_DIR.mkdir(parents=True, exist_ok=True)
     config.FINAL_ROOT.mkdir(parents=True, exist_ok=True)
     recovered_sessions = db.recover_interrupted_sessions()
     for session in db.query_all(
@@ -57,12 +65,16 @@ async def lifespan(_: FastAPI):
         except Exception as exc:
             logger.warning("Recovered chat merge failed for session %s: %s", session["id"], exc)
     recovered_jobs = db.recover_interrupted_encode_jobs()
+    recovered_clip_jobs = clip_worker.recover_interrupted_jobs()
     if any(recovered_sessions.values()):
         logger.warning("Recovered interrupted recording session(s): %s", recovered_sessions)
     if any(recovered_jobs.values()):
         logger.warning("Recovered interrupted encode job(s): %s", recovered_jobs)
+    if any(recovered_clip_jobs.values()):
+        logger.warning("Recovered interrupted clip job(s): %s", recovered_clip_jobs)
     recorder.start()
     encoder.start()
+    clip_worker.start()
     maintenance.start()
     media_indexer.start()
     logger.info("ChzzkBackup started")
@@ -71,6 +83,7 @@ async def lifespan(_: FastAPI):
     finally:
         await recorder.stop()
         await encoder.stop()
+        await clip_worker.stop()
         await maintenance.stop()
         await media_indexer.stop()
         logger.info("ChzzkBackup stopped")
@@ -91,9 +104,12 @@ async def health():
             "encoder": bool(encoder._task and not encoder._task.done()),
             "maintenance": bool(maintenance._task and not maintenance._task.done()),
             "indexer": bool(media_indexer._task and not media_indexer._task.done()),
+            "clipper": bool(clip_worker._task and not clip_worker._task.done()),
         },
         "storage": {"ok": storage_ok},
         "indexer": media_indexer.status(),
+        "clipper": clip_worker.status(),
+        "retention": retention.status(),
     }
 
 
@@ -116,7 +132,30 @@ def status_context() -> dict:
         "config": config,
         "media_summary": db.media_summary(),
         "indexer_status": media_indexer.status(),
+        "clip_jobs": clip_worker.jobs(limit=10),
+        "retention_status": retention.status(),
         "version": __version__,
+    }
+
+
+def retention_context() -> dict:
+    snapshot = retention.evaluate()
+    policies = retention.policies()
+    for policy in policies:
+        policy["max_gib"] = (
+            f"{int(policy['max_bytes']) / 1024**3:g}"
+            if policy.get("max_bytes") is not None
+            else ""
+        )
+        policy["preview"] = snapshot["by_policy"].get(
+            str(policy["policy_key"]),
+            {"candidate_count": 0, "candidate_bytes": 0, "deferred_count": 0},
+        )
+    return {
+        "retention_policies": policies,
+        "retention_snapshot": snapshot,
+        "trash_items": retention.trash_items(),
+        "deletion_history": retention.recent_deletions(),
     }
 
 
@@ -125,7 +164,11 @@ async def index(request: Request):
     return templates.TemplateResponse(
         request,
         "index.html",
-        {**status_context(), "logs": db.recent_logs(30)},
+        {
+            **status_context(),
+            **retention_context(),
+            "logs": db.recent_logs(30),
+        },
     )
 
 
@@ -138,13 +181,31 @@ async def library(
     date_from: str = "",
     date_to: str = "",
     sort: str = "desc",
+    retention_filter: str = "",
     page: int = 1,
 ):
     page = max(1, page)
-    items, total = db.list_media(
+    all_items, _ = db.list_media(
         q=q.strip(), platform=platform, channel=channel, date_from=date_from,
-        date_to=date_to, sort=sort, page=page,
+        date_to=date_to, sort=sort, page=1, page_size=1_000_000,
     )
+    snapshot = retention.evaluate()
+    filtered_items = []
+    for item in all_items:
+        state = snapshot["items"].get(int(item["id"]), {})
+        item["retention"] = state
+        if retention_filter == "inherit" and state.get("override") != "inherit":
+            continue
+        if retention_filter == "forever" and state.get("category") != "forever":
+            continue
+        if retention_filter == "scheduled" and state.get("category") != "scheduled":
+            continue
+        if retention_filter == "expiring" and state.get("category") != "expiring" and not state.get("candidate"):
+            continue
+        filtered_items.append(item)
+    total = len(filtered_items)
+    offset = (page - 1) * config.MEDIA_PAGE_SIZE
+    items = filtered_items[offset : offset + config.MEDIA_PAGE_SIZE]
     pages = max(1, (total + config.MEDIA_PAGE_SIZE - 1) // config.MEDIA_PAGE_SIZE)
     return templates.TemplateResponse(
         request,
@@ -153,6 +214,7 @@ async def library(
             "items": items, "total": total, "page": page, "pages": pages,
             "q": q, "platform": platform, "channel": channel,
             "date_from": date_from, "date_to": date_to, "sort": sort,
+            "retention_filter": retention_filter,
             "channels": db.media_channels(), "platforms": supported_platforms(),
             "version": __version__,
         },
@@ -172,8 +234,15 @@ def available_media_or_404(media_id: int) -> dict:
 @app.get("/library/{media_id}", response_class=HTMLResponse)
 async def watch_media(request: Request, media_id: int):
     item = available_media_or_404(media_id)
+    item["retention"] = retention.evaluate()["items"].get(media_id, {})
     return templates.TemplateResponse(
-        request, "player.html", {"item": item, "version": __version__}
+        request,
+        "player.html",
+        {
+            "item": item,
+            "clip_jobs": clip_worker.jobs(media_id=media_id),
+            "version": __version__,
+        },
     )
 
 
@@ -216,6 +285,247 @@ async def rename_media(media_id: int, title: str = Form(...)):
         raise HTTPException(status_code=404, detail="Media not found")
     logger.info("Media renamed: %s -> %s", media_id, renamed["title"])
     return RedirectResponse(f"/library/{media_id}", status_code=303)
+
+
+def optional_positive_int(value: str, label: str) -> int | None:
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"{label} must be an integer") from exc
+    if parsed <= 0:
+        raise HTTPException(status_code=400, detail=f"{label} must be positive")
+    return parsed
+
+
+def optional_gib_bytes(value: str) -> int | None:
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise HTTPException(status_code=400, detail="Maximum GiB must be a number") from exc
+    if parsed <= 0:
+        raise HTTPException(status_code=400, detail="Maximum GiB must be positive")
+    return int(parsed * Decimal(1024**3))
+
+
+def parse_policy_form(
+    retention_days: str,
+    max_items: str,
+    max_gib: str,
+) -> tuple[int | None, int | None, int | None]:
+    return (
+        optional_positive_int(retention_days, "Retention days"),
+        optional_positive_int(max_items, "Maximum item count"),
+        optional_gib_bytes(max_gib),
+    )
+
+
+@app.post("/retention/policies/preview", response_class=HTMLResponse)
+async def preview_retention_policy(
+    request: Request,
+    policy_key: str = Form(...),
+    retention_days: str = Form(""),
+    max_items: str = Form(""),
+    max_gib: str = Form(""),
+):
+    days, items, max_bytes = parse_policy_form(
+        retention_days, max_items, max_gib
+    )
+    preview = retention.preview_policy(
+        policy_key,
+        retention_days=days,
+        max_items=items,
+        max_bytes=max_bytes,
+    )
+    return templates.TemplateResponse(
+        request,
+        "partials/retention_preview.html",
+        {"preview": preview},
+    )
+
+
+@app.post("/retention/policies")
+async def save_retention_policy(
+    policy_key: str = Form(...),
+    retention_days: str = Form(""),
+    max_items: str = Form(""),
+    max_gib: str = Form(""),
+):
+    days, items, max_bytes = parse_policy_form(
+        retention_days, max_items, max_gib
+    )
+    try:
+        retention.set_policy(
+            policy_key,
+            retention_days=days,
+            max_items=items,
+            max_bytes=max_bytes,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    logger.info("Retention policy updated: %s", policy_key)
+    return RedirectResponse("/#retention-settings", status_code=303)
+
+
+@app.post("/retention/run")
+async def run_retention_now():
+    result = await asyncio.to_thread(retention.run_cleanup)
+    logger.info("Manual retention cleanup completed: %s", result)
+    return RedirectResponse("/#retention-settings", status_code=303)
+
+
+@app.post("/media/retention")
+async def update_media_retention_bulk(
+    media_ids: list[int] = Form(...),
+    retention_override: str = Form(...),
+    expires_on: str = Form(""),
+):
+    try:
+        retention.set_media_override(
+            media_ids,
+            retention_override,
+            expires_on.strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info(
+        "Bulk media retention updated: %s item(s) -> %s",
+        len(media_ids),
+        retention_override,
+    )
+    return RedirectResponse("/library", status_code=303)
+
+
+@app.post("/media/{media_id}/retention")
+async def update_media_retention(
+    media_id: int,
+    retention_override: str = Form(...),
+    expires_on: str = Form(""),
+):
+    try:
+        retention.set_media_override(
+            [media_id],
+            retention_override,
+            expires_on.strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    logger.info("Media retention updated: %s -> %s", media_id, retention_override)
+    return RedirectResponse(f"/library/{media_id}", status_code=303)
+
+
+@app.post("/retention/trash/{media_id}/restore")
+async def restore_retention_trash(media_id: int):
+    try:
+        retention.restore_media(media_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RedirectResponse("/#retention-settings", status_code=303)
+
+
+@app.post("/retention/trash/purge-all")
+async def purge_all_retention_trash():
+    retention.purge_all()
+    return RedirectResponse("/#retention-settings", status_code=303)
+
+
+@app.post("/retention/trash/{media_id}/purge")
+async def purge_retention_trash(media_id: int):
+    if not retention.purge_media(media_id):
+        raise HTTPException(status_code=404, detail="Trash item not found")
+    return RedirectResponse("/#retention-settings", status_code=303)
+
+
+def parse_clip_time(value: str) -> int:
+    match = CLIP_TIME_RE.fullmatch(value.strip())
+    if not match:
+        raise HTTPException(status_code=400, detail="Time must use HH:MM:SS")
+    return (
+        int(match["hours"]) * 3600
+        + int(match["minutes"]) * 60
+        + int(match["seconds"])
+    )
+
+
+def safe_next_url(value: str, fallback: str = "/") -> str:
+    return value if value.startswith("/") and not value.startswith("//") else fallback
+
+
+@app.post("/media/{media_id}/clips")
+async def create_clip(
+    media_id: int,
+    start_time: str = Form(...),
+    end_time: str = Form(...),
+):
+    start_seconds = parse_clip_time(start_time)
+    end_seconds = parse_clip_time(end_time)
+    try:
+        await clip_worker.create_job(media_id, start_seconds, end_seconds)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InsufficientClipStorageError as exc:
+        raise HTTPException(status_code=507, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return RedirectResponse(f"/library/{media_id}#clip-controls", status_code=303)
+
+
+@app.get("/clips/{job_id}/download")
+async def download_clip(job_id: int):
+    job = clip_worker.get_job(job_id)
+    if not job or job.get("status") != "completed" or not job.get("output_path"):
+        raise HTTPException(status_code=404, detail="Clip result not found")
+    expires_at = parse_datetime(job.get("expires_at"))
+    if not expires_at or expires_at <= parse_datetime(utc_now_iso()):
+        clip_worker.cleanup_expired()
+        raise HTTPException(status_code=404, detail="Clip result expired")
+    path = Path(str(job["output_path"]))
+    try:
+        path.resolve().relative_to(config.CLIP_TEMP_DIR.resolve())
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail="Clip result not found") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Clip result file not found")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=str(job["download_name"]),
+    )
+
+
+@app.post("/clips/{job_id}/cancel")
+async def cancel_clip(job_id: int, next_url: str = Form("/")):
+    if not await clip_worker.cancel_job(job_id):
+        raise HTTPException(status_code=409, detail="Clip job cannot be canceled")
+    return RedirectResponse(safe_next_url(next_url), status_code=303)
+
+
+@app.post("/clips/{job_id}/delete")
+async def delete_clip_result(job_id: int, next_url: str = Form("/")):
+    if not clip_worker.delete_result(job_id):
+        raise HTTPException(status_code=409, detail="Clip result cannot be deleted")
+    return RedirectResponse(safe_next_url(next_url), status_code=303)
+
+
+@app.get("/partials/clips/{media_id}", response_class=HTMLResponse)
+async def partial_media_clips(request: Request, media_id: int):
+    return templates.TemplateResponse(
+        request,
+        "partials/clip_jobs.html",
+        {
+            "clip_jobs": clip_worker.jobs(media_id=media_id),
+            "clip_next_url": f"/library/{media_id}#clip-controls",
+        },
+    )
 
 
 @app.get("/partials/status", response_class=HTMLResponse)

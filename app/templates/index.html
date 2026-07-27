@@ -48,6 +48,117 @@
   </div>
 </section>
 
+<details class="settings-panel" id="retention-settings">
+  <summary>저장 정책 · 휴지통</summary>
+  <section class="panel retention-overview">
+    <div class="page-heading">
+      <div>
+        <h2>채널 기본 저장 정책</h2>
+        <p class="muted">모든 제한을 비우면 무기한입니다. 저장 후 매시간 자동 정리되며, 미리보기는 파일을 변경하지 않습니다.</p>
+      </div>
+      <form method="post" action="/retention/run" onsubmit="return confirm('현재 정책으로 만료 영상을 휴지통으로 이동할까요?')">
+        <button type="submit">지금 정리</button>
+      </form>
+    </div>
+    <div class="retention-policy-list">
+      {% for policy in retention_policies %}
+      <form class="retention-policy" method="post" action="/retention/policies">
+        <input type="hidden" name="policy_key" value="{{ policy.policy_key }}">
+        <div class="retention-policy-title">
+          <strong>{{ policy.channel_name }}</strong>
+          <span>{{ policy.platform|platform_label }} · {{ "등록 채널" if policy.channel_id else "발견된 채널" }}</span>
+        </div>
+        <label>보관일수
+          <input class="retention-days" name="retention_days" type="number" min="1" value="{{ policy.retention_days or '' }}" placeholder="무기한">
+        </label>
+        <div class="retention-presets" aria-label="보관기간 프리셋">
+          {% for days in [30, 90, 180, 365] %}
+          <button type="button" data-retention-days="{{ days }}">{{ days }}일</button>
+          {% endfor %}
+          <button type="button" data-retention-unlimited>무기한</button>
+        </div>
+        <label>최대 영상 개수
+          <input name="max_items" type="number" min="1" value="{{ policy.max_items or '' }}" placeholder="제한 없음">
+        </label>
+        <label>최대 영상 용량 (GiB)
+          <input name="max_gib" type="number" min="0.01" step="0.01" value="{{ policy.max_gib }}" placeholder="제한 없음">
+        </label>
+        <div class="retention-policy-actions">
+          <button
+            type="button"
+            hx-post="/retention/policies/preview"
+            hx-include="closest form"
+            hx-target="#retention-preview-{{ loop.index }}"
+            hx-swap="innerHTML"
+          >미리보기</button>
+          <button type="submit">저장</button>
+        </div>
+        <div class="retention-preview muted" id="retention-preview-{{ loop.index }}">
+          {% set preview = policy.preview %}
+          {% include "partials/retention_preview.html" %}
+        </div>
+      </form>
+      {% else %}
+      <p class="muted">정책을 적용할 채널이 없습니다.</p>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="grid retention-secondary">
+    <div class="panel">
+      <div class="page-heading">
+        <div>
+          <h2>휴지통</h2>
+          <p class="muted">같은 저장 볼륨에 보관되므로 영구 삭제 시 실제 공간이 확보됩니다.</p>
+        </div>
+        {% if trash_items %}
+        <form method="post" action="/retention/trash/purge-all" onsubmit="return confirm('휴지통의 모든 영상과 채팅을 영구 삭제할까요? 이 작업은 되돌릴 수 없습니다.')">
+          <button class="danger" type="submit">전체 비우기</button>
+        </form>
+        {% endif %}
+      </div>
+      <div class="list compact">
+        {% for item in trash_items %}
+        <div class="row">
+          <div>
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.channel_name }} · {{ item.size_bytes|bytes }}</span>
+            <span>{{ item.retention_reason }} · {{ item.purge_after|kst_datetime }} 영구 삭제</span>
+          </div>
+          <div class="job-actions">
+            <form method="post" action="/retention/trash/{{ item.id }}/restore">
+              <button type="submit">복원·무기한</button>
+            </form>
+            <form method="post" action="/retention/trash/{{ item.id }}/purge" onsubmit="return confirm('이 영상을 지금 영구 삭제할까요?')">
+              <button class="danger" type="submit">영구 삭제</button>
+            </form>
+          </div>
+        </div>
+        {% else %}
+        <p class="muted">휴지통이 비어 있습니다.</p>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>최근 영구 삭제 이력</h2>
+      <div class="list compact">
+        {% for item in deletion_history %}
+        <div class="row">
+          <div>
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.channel_name }} · {{ item.size_bytes|bytes }}</span>
+            <span>{{ item.reason }} · {{ item.deleted_at|kst_datetime }}</span>
+          </div>
+        </div>
+        {% else %}
+        <p class="muted">영구 삭제 이력이 없습니다.</p>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+</details>
+
 <details class="settings-panel">
   <summary>토큰 설정</summary>
 <section class="grid settings-grid">
@@ -81,4 +192,22 @@
 <div id="logs" hx-get="/partials/logs" hx-trigger="every 5s" hx-swap="innerHTML">
   {% include "partials/logs.html" %}
 </div>
+<script>
+  document.querySelectorAll("[data-retention-days]").forEach(button => {
+    button.addEventListener("click", () => {
+      button.closest(".retention-policy").querySelector(".retention-days").value = button.dataset.retentionDays;
+    });
+  });
+  document.querySelectorAll("[data-retention-unlimited]").forEach(button => {
+    button.addEventListener("click", () => {
+      const form = button.closest(".retention-policy");
+      form.querySelector("[name=retention_days]").value = "";
+      form.querySelector("[name=max_items]").value = "";
+      form.querySelector("[name=max_gib]").value = "";
+    });
+  });
+  if (window.location.hash === "#retention-settings") {
+    document.getElementById("retention-settings").open = true;
+  }
+</script>
 {% endblock %}

@@ -10,19 +10,58 @@
   <input type="date" name="date_from" value="{{ date_from }}" aria-label="시작 날짜">
   <input type="date" name="date_to" value="{{ date_to }}" aria-label="종료 날짜">
   <select name="sort"><option value="desc" {{ 'selected' if sort == 'desc' else '' }}>최신순</option><option value="asc" {{ 'selected' if sort == 'asc' else '' }}>오래된순</option></select>
+  <select name="retention_filter" aria-label="저장 정책">
+    <option value="">모든 저장 정책</option>
+    <option value="inherit" {{ 'selected' if retention_filter == 'inherit' else '' }}>채널 상속</option>
+    <option value="forever" {{ 'selected' if retention_filter == 'forever' else '' }}>무기한</option>
+    <option value="scheduled" {{ 'selected' if retention_filter == 'scheduled' else '' }}>지정일 보호</option>
+    <option value="expiring" {{ 'selected' if retention_filter == 'expiring' else '' }}>7일 내 만료</option>
+  </select>
   <button>검색</button>
 </form>
-<section class="media-grid">
-  {% for item in items %}
-  <a class="media-card" href="/library/{{ item.id }}">
-    <div class="media-thumb">{% if item.thumbnail_path %}<img src="/media/{{ item.id }}/thumbnail" alt="" loading="lazy">{% else %}<span>미리보기 생성 중</span>{% endif %}</div>
-    <div class="media-info"><strong>{{ item.title }}</strong><span>{{ item.channel_name }} · {{ item.platform|platform_label }}</span><span>{{ item.started_at|kst_datetime }} · {{ item.duration_seconds|duration }} · {{ item.size_bytes|bytes }}</span></div>
-  </a>
-  {% else %}<div class="panel muted">조건에 맞는 영상이 없습니다.</div>{% endfor %}
-</section>
+<form class="bulk-retention" method="post" action="/media/retention">
+  <div class="bulk-toolbar panel">
+    <strong>선택 영상 저장 정책</strong>
+    <select name="retention_override">
+      <option value="inherit">채널 정책 상속</option>
+      <option value="forever">무기한</option>
+      <option value="scheduled">지정일까지 보호</option>
+    </select>
+    <input type="date" name="expires_on" aria-label="보호 종료일">
+    <button type="submit">일괄 적용</button>
+  </div>
+  <section class="media-grid">
+    {% for item in items %}
+    <article class="media-card">
+      <label class="media-select"><input type="checkbox" name="media_ids" value="{{ item.id }}"> 선택</label>
+      <a href="/library/{{ item.id }}">
+        <div class="media-thumb">{% if item.thumbnail_path %}<img src="/media/{{ item.id }}/thumbnail" alt="" loading="lazy">{% else %}<span>미리보기 생성 중</span>{% endif %}</div>
+        <div class="media-info">
+          <strong>{{ item.title }}</strong>
+          <span>{{ item.channel_name }} · {{ item.platform|platform_label }}</span>
+          <span>{{ item.started_at|kst_datetime }} · {{ item.duration_seconds|duration }} · {{ item.size_bytes|bytes }}</span>
+          {% if item.retention.override == "forever" %}
+          <span class="retention-badge">무기한</span>
+          {% elif item.retention.override == "scheduled" %}
+          <span class="retention-badge {{ 'warn' if item.retention.candidate else '' }}">지정일 · {{ item.retention.expires_at|kst_datetime }}</span>
+          {% elif item.retention.candidate %}
+          <span class="retention-badge warn">정리 대상 · {{ item.retention.reason }}</span>
+          {% elif item.retention.category == "forever" %}
+          <span class="retention-badge">채널 무기한</span>
+          {% elif item.retention.expires_at %}
+          <span class="retention-badge">채널 상속 · {{ item.retention.expires_at|kst_datetime }}</span>
+          {% else %}
+          <span class="retention-badge">채널 정책 상속</span>
+          {% endif %}
+        </div>
+      </a>
+    </article>
+    {% else %}<div class="panel muted">조건에 맞는 영상이 없습니다.</div>{% endfor %}
+  </section>
+</form>
 {% if pages > 1 %}<nav class="pagination">
-  {% if page > 1 %}<a href="?q={{ q }}&platform={{ platform }}&channel={{ channel }}&date_from={{ date_from }}&date_to={{ date_to }}&sort={{ sort }}&page={{ page - 1 }}">이전</a>{% endif %}
+  {% if page > 1 %}<a href="?q={{ q }}&platform={{ platform }}&channel={{ channel }}&date_from={{ date_from }}&date_to={{ date_to }}&sort={{ sort }}&retention_filter={{ retention_filter }}&page={{ page - 1 }}">이전</a>{% endif %}
   <span>{{ page }} / {{ pages }}</span>
-  {% if page < pages %}<a href="?q={{ q }}&platform={{ platform }}&channel={{ channel }}&date_from={{ date_from }}&date_to={{ date_to }}&sort={{ sort }}&page={{ page + 1 }}">다음</a>{% endif %}
+  {% if page < pages %}<a href="?q={{ q }}&platform={{ platform }}&channel={{ channel }}&date_from={{ date_from }}&date_to={{ date_to }}&sort={{ sort }}&retention_filter={{ retention_filter }}&page={{ page + 1 }}">다음</a>{% endif %}
 </nav>{% endif %}
 {% endblock %}

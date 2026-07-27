@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import config
+from .clipper import clip_worker
 from .db import db
 from .logger import logger
+from .retention import retention
 
 
 class MaintenanceWorker:
@@ -28,6 +30,8 @@ class MaintenanceWorker:
             try:
                 db.cleanup_old_logs()
                 self.cleanup_failed_temp_files()
+                retention.run_cleanup()
+                clip_worker.cleanup_expired()
             except Exception as exc:
                 logger.warning("Maintenance failed: %s", exc)
             try:
