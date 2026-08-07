@@ -1,7 +1,28 @@
 (() => {
+  const CHAT_DELAY_KEY = "chzzkbackup-chat-delay-seconds";
+  const CHAT_DELAY_MIN = -60;
+  const CHAT_DELAY_MAX = 60;
+  const CHAT_DELAY_STEP = 0.5;
+
   const normalizedSeconds = value => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0;
+  };
+  const normalizeChatDelay = value => {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return 0;
+    const stepped = Math.round(parsed / CHAT_DELAY_STEP) * CHAT_DELAY_STEP;
+    return Math.min(CHAT_DELAY_MAX, Math.max(CHAT_DELAY_MIN, stepped));
+  };
+  const adjustedChatOffset = (offset, delay, duration) => {
+    if (offset == null || offset === "") return null;
+    const parsedOffset = Number(offset);
+    if (!Number.isFinite(parsedOffset)) return null;
+    const adjusted = Math.max(0, parsedOffset + normalizeChatDelay(delay));
+    const parsedDuration = duration == null ? Number.NaN : Number(duration);
+    return Number.isFinite(parsedDuration) && parsedDuration >= 0
+      ? Math.min(adjusted, parsedDuration)
+      : adjusted;
   };
   const pad2 = value => String(value).padStart(2, "0");
   const formatTimelineTime = value => {
@@ -12,6 +33,10 @@
     return hours > 0
       ? `${hours}:${pad2(minutes)}:${pad2(seconds)}`
       : `${pad2(minutes)}:${pad2(seconds)}`;
+  };
+  const formatDelay = value => {
+    const normalized = normalizeChatDelay(value);
+    return `${normalized >= 0 ? "+" : ""}${normalized.toFixed(1)}초`;
   };
   const formatFilenameTime = value => {
     const total = normalizedSeconds(value);
@@ -31,7 +56,13 @@
     `${sanitizeFilenameBase(title)}_${formatFilenameTime(currentTime)}.png`;
 
   if (typeof module !== "undefined" && module.exports) {
-    module.exports = { formatTimelineTime, screenshotFilename };
+    module.exports = {
+      adjustedChatOffset,
+      formatDelay,
+      formatTimelineTime,
+      normalizeChatDelay,
+      screenshotFilename,
+    };
   }
   if (typeof document === "undefined") return;
 
@@ -44,21 +75,108 @@
   const clipEnd = document.getElementById("clip-end");
   const captureButton = document.getElementById("capture-frame");
   const captureStatus = document.getElementById("capture-status");
+  const delayEarlier = document.getElementById("chat-delay-earlier");
+  const delayLater = document.getElementById("chat-delay-later");
+  const delayReset = document.getElementById("chat-delay-reset");
+  const delayValue = document.getElementById("chat-delay-value");
   let rows = [], enabled = new Set(), visible = [], active = -1;
+  let chatDelay = 0;
+  let chatLoaded = false;
   let captureStatusTimer;
+
+  const escapeHtml = text => {
+    const node = document.createElement("span");
+    node.textContent = text;
+    return node.innerHTML;
+  };
+  const currentVideoDuration = () =>
+    Number.isFinite(player.duration) && player.duration >= 0 ? player.duration : undefined;
+  const effectiveOffset = row =>
+    adjustedChatOffset(row.offset_seconds, chatDelay, currentVideoDuration());
+  const syncChatToPlayer = () => {
+    let found = -1;
+    for (let index = 0; index < visible.length; index += 1) {
+      const offset = effectiveOffset(visible[index]);
+      if (offset != null && offset <= player.currentTime) found = index;
+      else if (offset != null) break;
+    }
+    if (found === active && list.querySelector(".current")) return;
+    list.querySelector(".current")?.classList.remove("current");
+    active = found;
+    const element = list.querySelector(`[data-index='${found}']`);
+    if (element) {
+      element.classList.add("current");
+      if (autoScroll.checked) element.scrollIntoView({ block: "center" });
+    }
+  };
   const render = () => {
     const term = search.value.trim().toLowerCase();
     visible = rows.filter(row => enabled.has(row.type) && (!term || `${row.nickname} ${row.content}`.toLowerCase().includes(term)));
-    list.innerHTML = visible.length ? visible.map((row, index) => `<button class="chat-row ${row.sync_state}" data-index="${index}" ${row.offset_seconds == null ? "disabled" : ""}><time>${row.offset_seconds == null ? "누락" : formatTimelineTime(row.offset_seconds)}</time><span><strong>${escapeHtml(row.nickname)}</strong>${escapeHtml(row.content)}</span></button>`).join("") : '<p class="muted">표시할 채팅이 없습니다.</p>';
+    list.innerHTML = visible.length
+      ? visible.map((row, index) => {
+        const offset = effectiveOffset(row);
+        return `<button class="chat-row ${row.sync_state}" data-index="${index}" ${offset == null ? "disabled" : ""}><time>${offset == null ? "누락" : formatTimelineTime(offset)}</time><span><strong>${escapeHtml(row.nickname)}</strong>${escapeHtml(row.content)}</span></button>`;
+      }).join("")
+      : '<p class="muted">표시할 채팅이 없습니다.</p>';
+    active = -1;
+    syncChatToPlayer();
   };
-  const escapeHtml = text => { const node=document.createElement("span"); node.textContent=text; return node.innerHTML; };
-  fetch(`/media/${window.CHZZK_MEDIA_ID}/chat`).then(r => r.json()).then(data => {
-    rows = data; [...new Set(rows.map(row => row.type))].forEach(type => { enabled.add(type); filters.insertAdjacentHTML("beforeend", `<label><input type="checkbox" value="${escapeHtml(type)}" checked> ${escapeHtml(type)}</label>`); }); render();
-  }).catch(() => { list.innerHTML='<p class="error">채팅을 불러오지 못했습니다.</p>'; });
-  filters.addEventListener("change", event => { event.target.checked ? enabled.add(event.target.value) : enabled.delete(event.target.value); render(); });
+  const updateDelayControls = () => {
+    delayValue.textContent = formatDelay(chatDelay);
+    delayEarlier.disabled = chatDelay <= CHAT_DELAY_MIN;
+    delayLater.disabled = chatDelay >= CHAT_DELAY_MAX;
+    delayReset.disabled = chatDelay === 0;
+  };
+  const persistChatDelay = () => {
+    try {
+      localStorage.setItem(CHAT_DELAY_KEY, String(chatDelay));
+    } catch (_error) {
+      // The in-memory value remains usable when browser storage is unavailable.
+    }
+  };
+  const setChatDelay = value => {
+    chatDelay = normalizeChatDelay(value);
+    persistChatDelay();
+    updateDelayControls();
+    if (chatLoaded) render();
+  };
+  try {
+    chatDelay = normalizeChatDelay(localStorage.getItem(CHAT_DELAY_KEY));
+  } catch (_error) {
+    chatDelay = 0;
+  }
+  updateDelayControls();
+
+  fetch(`/media/${window.CHZZK_MEDIA_ID}/chat`).then(response => response.json()).then(data => {
+    rows = data;
+    [...new Set(rows.map(row => row.type))].forEach(type => {
+      enabled.add(type);
+      filters.insertAdjacentHTML("beforeend", `<label><input type="checkbox" value="${escapeHtml(type)}" checked> ${escapeHtml(type)}</label>`);
+    });
+    chatLoaded = true;
+    render();
+  }).catch(() => {
+    list.innerHTML = '<p class="error">채팅을 불러오지 못했습니다.</p>';
+  });
+  filters.addEventListener("change", event => {
+    event.target.checked ? enabled.add(event.target.value) : enabled.delete(event.target.value);
+    render();
+  });
   search.addEventListener("input", render);
-  list.addEventListener("click", event => { const button=event.target.closest("button[data-index]"); if(!button)return; const row=visible[Number(button.dataset.index)]; if(row.offset_seconds!=null){player.currentTime=row.offset_seconds; player.play();} });
-  player.addEventListener("timeupdate", () => { let found=-1; for(let i=0;i<visible.length;i++){if(visible[i].offset_seconds!=null&&visible[i].offset_seconds<=player.currentTime)found=i;else if(visible[i].offset_seconds!=null)break;} if(found===active)return; list.querySelector(".current")?.classList.remove("current"); active=found; const element=list.querySelector(`[data-index='${found}']`); if(element){element.classList.add("current"); if(autoScroll.checked)element.scrollIntoView({block:"center"});} });
+  list.addEventListener("click", event => {
+    const button = event.target.closest("button[data-index]");
+    if (!button) return;
+    const offset = effectiveOffset(visible[Number(button.dataset.index)]);
+    if (offset != null) {
+      player.currentTime = offset;
+      player.play();
+    }
+  });
+  player.addEventListener("timeupdate", syncChatToPlayer);
+  delayEarlier.addEventListener("click", () => setChatDelay(chatDelay - CHAT_DELAY_STEP));
+  delayLater.addEventListener("click", () => setChatDelay(chatDelay + CHAT_DELAY_STEP));
+  delayReset.addEventListener("click", () => setChatDelay(0));
+
   const formatClipTime = value => {
     const total = normalizedSeconds(value);
     const hours = Math.floor(total / 3600);
@@ -130,6 +248,11 @@
   };
 
   captureButton.addEventListener("click", downloadCurrentFrame);
+  player.addEventListener("loadedmetadata", () => {
+    if (chatLoaded) render();
+    updateCaptureAvailability();
+  });
+  player.addEventListener("durationchange", () => { if (chatLoaded) render(); });
   player.addEventListener("loadeddata", updateCaptureAvailability);
   player.addEventListener("canplay", updateCaptureAvailability);
   player.addEventListener("seeked", updateCaptureAvailability);

@@ -46,9 +46,18 @@
     </section>
   </div>
   <aside class="chat-panel">
-    <div class="chat-toolbar"><input id="chat-search" placeholder="닉네임·내용 검색"><label><input id="auto-scroll" type="checkbox" checked> 자동 스크롤</label></div>
+    <div class="chat-toolbar">
+      <input id="chat-search" placeholder="닉네임·내용 검색">
+      <div class="chat-delay-controls" role="group" aria-label="채팅 딜레이 보정">
+        <output id="chat-delay-value" aria-live="polite">+0.0초</output>
+        <button type="button" id="chat-delay-earlier" aria-label="채팅을 0.5초 일찍 표시">−0.5초</button>
+        <button type="button" id="chat-delay-later" aria-label="채팅을 0.5초 늦게 표시">+0.5초</button>
+        <button type="button" id="chat-delay-reset" aria-label="채팅 딜레이 초기화" disabled>초기화</button>
+      </div>
+      <label><input id="auto-scroll" type="checkbox" checked> 자동 스크롤</label>
+    </div>
     <div id="chat-types" class="type-filters"></div><div id="chat-list" class="chat-timeline"><p class="muted">채팅을 불러오는 중…</p></div>
   </aside>
 </section>
-<script>window.CHZZK_MEDIA_ID={{ item.id }};</script><script src="/static/player.js"></script>
+<script>window.CHZZK_MEDIA_ID={{ item.id }};</script><script src="/static/player.js?v={{ version }}"></script>
 {% endblock %}
