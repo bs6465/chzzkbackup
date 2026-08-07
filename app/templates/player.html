@@ -3,6 +3,10 @@
 <section class="page-heading"><div><a href="/library">← 보관함</a><h2>{{ item.title }}</h2><p class="muted">{{ item.channel_name }} · {{ item.started_at|kst_datetime }}</p></div><a class="button-link" href="/media/{{ item.id }}/download">원본 다운로드</a></section>
 <section class="player-layout">
   <div class="video-panel"><video id="player" controls preload="metadata" src="/media/{{ item.id }}/video"></video>
+    <div class="player-capture">
+      <button type="button" id="capture-frame" data-media-title="{{ item.title }}" disabled>스크린샷 저장 (S)</button>
+      <output id="capture-status" class="muted" role="status" aria-live="polite">영상 준비 중…</output>
+    </div>
     <form class="inline-form rename-player" method="post" action="/media/{{ item.id }}/rename"><input name="title" value="{{ item.title }}" required><button>제목·파일명 변경</button></form>
     <section class="player-tools">
       <h2>저장 정책</h2>

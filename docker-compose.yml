@@ -1,11 +1,11 @@
 services:
   chzzkbackup:
-    image: chzzkbackup:0.4.1
+    image: chzzkbackup:0.4.2
     build:
       context: .
     container_name: chzzkbackup
     user: "1000:1000"
-    restart: unless-stopped
+    restart: always
     environment:
       TZ: Asia/Seoul
       APP_DATA_DIR: /app/data

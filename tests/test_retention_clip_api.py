@@ -23,7 +23,7 @@ def test_retention_and_clip_forms_render_and_update(tmp_path, monkeypatch):
     media_id = database.upsert_media_item(
         video_path=video,
         channel_name="Streamer",
-        title="Video",
+        title='Video & "Capture"',
         started_at="2026-06-11T08:55:54+09:00",
         duration_seconds=10,
         size_bytes=10,
@@ -46,6 +46,11 @@ def test_retention_and_clip_forms_render_and_update(tmp_path, monkeypatch):
     assert "저장 정책 · 휴지통" in index.text
     assert "선택 영상 저장 정책" in library.text
     assert "구간 다운로드" in player.text
+    assert 'id="capture-frame"' in player.text
+    assert 'data-media-title="Video &amp; &#34;Capture&#34;" disabled' in player.text
+    assert "스크린샷 저장 (S)" in player.text
+    assert 'id="capture-status"' in player.text
+    assert 'aria-live="polite"' in player.text
 
     key = database.get_media_item(media_id)["retention_policy_key"]
     preview = client.post(

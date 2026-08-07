@@ -142,6 +142,8 @@ main {
 .player-layout { display:grid; grid-template-columns:minmax(0,2fr) minmax(360px,1fr); gap:16px; min-height:70vh; }
 .video-panel, .chat-panel { border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:12px; }
 .video-panel video { width:100%; max-height:72vh; background:#000; }
+.player-capture { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-height:36px; margin-top:10px; }
+.player-capture output { font-size:13px; overflow-wrap:anywhere; }
 .rename-player { margin-top:12px; }
 .player-tools { display:grid; gap:10px; margin-top:16px; border-top:1px solid var(--line); padding-top:16px; }
 .player-tools h2 { margin:0; }
@@ -154,7 +156,7 @@ main {
 .chat-toolbar input[type=checkbox], .type-filters input { width:auto; }
 .type-filters { display:flex; flex-wrap:wrap; gap:10px; padding:10px 0; color:var(--muted); font-size:13px; }
 .chat-timeline { height:65vh; overflow:auto; border-top:1px solid var(--line); }
-.chat-row { display:grid; grid-template-columns:52px 1fr; width:100%; text-align:left; border-radius:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); white-space:normal; }
+.chat-row { display:grid; grid-template-columns:72px minmax(0,1fr); width:100%; text-align:left; border-radius:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); white-space:normal; }
 .chat-row time { color:var(--muted); font-variant-numeric:tabular-nums; }
 .chat-row span { display:grid; gap:2px; }
 .chat-row.current { background:color-mix(in srgb, var(--accent) 20%, transparent); }
@@ -287,6 +289,11 @@ button {
   font: inherit;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.player-capture button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
 }
 
 button.danger {
