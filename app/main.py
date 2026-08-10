@@ -5,6 +5,7 @@ import re
 from contextlib import asynccontextmanager
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -18,6 +19,7 @@ from .bookmarks import (
     BookmarkService,
     BookmarkValidationError,
     InactiveRecordingError,
+    normalize_sync_seconds,
 )
 from .chzzk_api import test_tokens as test_chzzk_tokens
 from .clipper import InsufficientClipStorageError, clip_worker
@@ -56,21 +58,32 @@ CLIP_TIME_RE = re.compile(r"^(?P<hours>\d+):(?P<minutes>[0-5]\d):(?P<seconds>[0-
 
 class LiveBookmarkCreate(BaseModel):
     content: str = ""
+    kind: Literal["point", "range"] = "point"
 
 
 class MediaBookmarkCreate(BaseModel):
     display_offset_seconds: float
     content: str = ""
+    kind: Literal["point", "range"] = "point"
 
 
 class BookmarkUpdate(BaseModel):
     display_offset_seconds: float | None = None
+    end_display_offset_seconds: float | None = None
     content: str | None = None
+    kind: Literal["point", "range"] | None = None
     use_current_live_time: bool = False
+    use_current_live_end_time: bool = False
 
 
 class BookmarkShiftUpdate(BaseModel):
-    shift_seconds: float
+    shift_seconds: float | None = None
+    reset_to_channel_default: bool = False
+
+
+class ChatDelayUpdate(BaseModel):
+    delay_seconds: float | None = None
+    reset_to_channel_default: bool = False
 
 
 @asynccontextmanager
@@ -261,6 +274,7 @@ def available_media_or_404(media_id: int) -> dict:
 async def watch_media(request: Request, media_id: int):
     item = available_media_or_404(media_id)
     item["retention"] = retention.evaluate()["items"].get(media_id, {})
+    item["sync"] = BookmarkService(db).media_sync(media_id)
     return templates.TemplateResponse(
         request,
         "player.html",
@@ -319,7 +333,9 @@ async def recording_bookmarks(session_id: int):
 @app.post("/recordings/{session_id}/bookmarks", status_code=201)
 async def create_recording_bookmark(session_id: int, payload: LiveBookmarkCreate):
     return bookmark_result(
-        lambda: BookmarkService(db).create_live_bookmark(session_id, payload.content)
+        lambda: BookmarkService(db).create_live_bookmark(
+            session_id, payload.content, payload.kind
+        )
     )
 
 
@@ -334,7 +350,7 @@ async def create_media_bookmark(media_id: int, payload: MediaBookmarkCreate):
     available_media_or_404(media_id)
     return bookmark_result(
         lambda: BookmarkService(db).create_media_bookmark(
-            media_id, payload.display_offset_seconds, payload.content
+            media_id, payload.display_offset_seconds, payload.content, payload.kind
         )
     )
 
@@ -345,11 +361,16 @@ async def update_bookmark(bookmark_id: int, payload: BookmarkUpdate):
     return bookmark_result(
         lambda: BookmarkService(db).update_bookmark(
             bookmark_id,
+            kind=payload.kind,
+            kind_provided="kind" in fields,
             content=payload.content,
             content_provided="content" in fields,
             display_offset_seconds=payload.display_offset_seconds,
             offset_provided="display_offset_seconds" in fields,
+            end_display_offset_seconds=payload.end_display_offset_seconds,
+            end_offset_provided="end_display_offset_seconds" in fields,
             use_current_live_time=payload.use_current_live_time,
+            use_current_live_end_time=payload.use_current_live_end_time,
         )
     )
 
@@ -363,7 +384,23 @@ async def delete_bookmark(bookmark_id: int):
 async def update_media_bookmark_shift(media_id: int, payload: BookmarkShiftUpdate):
     available_media_or_404(media_id)
     return bookmark_result(
-        lambda: BookmarkService(db).set_media_shift(media_id, payload.shift_seconds)
+        lambda: BookmarkService(db).set_media_shift(
+            media_id,
+            payload.shift_seconds,
+            reset_to_channel_default=payload.reset_to_channel_default,
+        )
+    )
+
+
+@app.put("/media/{media_id}/chat-delay")
+async def update_media_chat_delay(media_id: int, payload: ChatDelayUpdate):
+    available_media_or_404(media_id)
+    return bookmark_result(
+        lambda: BookmarkService(db).set_media_chat_delay(
+            media_id,
+            payload.delay_seconds,
+            reset_to_channel_default=payload.reset_to_channel_default,
+        )
     )
 
 
@@ -670,6 +707,31 @@ async def toggle_channel(channel_id: str):
     db.set_channel_active(channel_id, not bool(channel["active"]))
     logger.info("Channel toggled: %s -> %s", channel_id, not bool(channel["active"]))
     return RedirectResponse("/", status_code=303)
+
+
+@app.post("/channels/{channel_id}/sync-defaults")
+async def update_channel_sync_defaults(
+    channel_id: str,
+    chat_delay_seconds: str = Form("0"),
+    bookmark_shift_seconds: str = Form("0"),
+):
+    if not db.get_channel(channel_id):
+        raise HTTPException(status_code=404, detail="Channel not found")
+    try:
+        chat_delay = normalize_sync_seconds(chat_delay_seconds, "채팅 보정값")
+        bookmark_shift = normalize_sync_seconds(
+            bookmark_shift_seconds, "북마크 보정값"
+        )
+    except BookmarkValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.set_channel_sync_defaults(channel_id, chat_delay, bookmark_shift)
+    logger.info(
+        "Channel sync defaults updated: %s chat=%s bookmark=%s",
+        channel_id,
+        chat_delay,
+        bookmark_shift,
+    )
+    return RedirectResponse("/#channel-settings", status_code=303)
 
 
 @app.post("/channels/{channel_id}/delete")

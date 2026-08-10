@@ -39,9 +39,22 @@ def test_live_bookmark_api_and_dashboard_controls(tmp_path, monkeypatch):
     assert dashboard.status_code == 200
     assert f'data-session-id="{session_id}"' in dashboard.text
     assert "현재 시점 체크" in dashboard.text
+    assert "구간 시작" in dashboard.text
+    assert "채팅 기본" in dashboard.text
+    assert "북마크 기본" in dashboard.text
     assert "북마크 메모 (선택)" in dashboard.text
     assert "hx-preserve" in dashboard.text
-    assert '/static/bookmarks.js?v=0.4.4' in dashboard.text
+    assert '/static/bookmarks.js?v=0.4.5' in dashboard.text
+
+    defaults = client.post(
+        "/channels/streamer-id/sync-defaults",
+        data={"chat_delay_seconds": "1.4", "bookmark_shift_seconds": "-2.6"},
+        follow_redirects=False,
+    )
+    assert defaults.status_code == 303
+    channel = database.get_channel("streamer-id")
+    assert channel["default_chat_delay_seconds"] == 1.5
+    assert channel["default_bookmark_shift_seconds"] == -2.5
 
     created = client.post(
         f"/recordings/{session_id}/bookmarks", json={"content": "important"}
@@ -50,6 +63,26 @@ def test_live_bookmark_api_and_dashboard_controls(tmp_path, monkeypatch):
     bookmark = created.json()["bookmarks"][0]
     assert bookmark["content"] == "important"
     assert bookmark["resolved"] is False
+    assert bookmark["kind"] == "point"
+
+    opened_range = client.post(
+        f"/recordings/{session_id}/bookmarks",
+        json={"content": "range", "kind": "range"},
+    )
+    assert opened_range.status_code == 201
+    live_range = next(
+        item for item in opened_range.json()["bookmarks"] if item["content"] == "range"
+    )
+    assert live_range["complete"] is False
+    ended_range = client.patch(
+        f"/bookmarks/{live_range['id']}",
+        json={"use_current_live_end_time": True},
+    )
+    assert ended_range.status_code == 200
+    live_range = next(
+        item for item in ended_range.json()["bookmarks"] if item["id"] == live_range["id"]
+    )
+    assert live_range["complete"] is True
 
     updated = client.patch(
         f"/bookmarks/{bookmark['id']}",
@@ -79,7 +112,9 @@ def test_live_bookmark_api_and_dashboard_controls(tmp_path, monkeypatch):
 
     deleted = client.delete(f"/bookmarks/{bookmark['id']}")
     assert deleted.status_code == 200
-    assert deleted.json()["bookmarks"] == []
+    assert [item["id"] for item in deleted.json()["bookmarks"]] == [live_range["id"]]
+    deleted_range = client.delete(f"/bookmarks/{live_range['id']}")
+    assert deleted_range.json()["bookmarks"] == []
 
 
 def test_media_bookmark_api_shift_and_player_controls(tmp_path, monkeypatch):
@@ -116,8 +151,11 @@ def test_media_bookmark_api_shift_and_player_controls(tmp_path, monkeypatch):
     assert 'id="bookmark-controls"' in player.text
     assert 'data-bookmark-scope="media"' in player.text
     assert "현재 위치 북마크" in player.text
+    assert "구간 시작" in player.text
+    assert 'data-seek-seconds="-10"' in player.text
+    assert 'data-seek-seconds="10"' in player.text
     assert "북마크 전체 시간 보정" in player.text
-    assert '/static/bookmarks.js?v=0.4.4' in player.text
+    assert '/static/bookmarks.js?v=0.4.5' in player.text
 
     attached = client.get(f"/media/{media_id}/bookmarks")
     assert attached.status_code == 200
@@ -129,6 +167,12 @@ def test_media_bookmark_api_shift_and_player_controls(tmp_path, monkeypatch):
     )
     assert shifted.status_code == 200
     assert shifted.json()["shift_seconds"] == 60
+
+    chat_shifted = client.put(
+        f"/media/{media_id}/chat-delay", json={"delay_seconds": -2.4}
+    )
+    assert chat_shifted.status_code == 200
+    assert chat_shifted.json()["chat_delay_seconds"] == -2.5
 
     created = client.post(
         f"/media/{media_id}/bookmarks",
@@ -147,6 +191,18 @@ def test_media_bookmark_api_shift_and_player_controls(tmp_path, monkeypatch):
     assert changed["offset_seconds"] == -15
     assert changed["effective_offset_seconds"] == 45
     assert changed["content"] == "changed"
+
+    database.set_channel_sync_defaults("streamer-id", 1.5, -2.5)
+    chat_reset = client.put(
+        f"/media/{media_id}/chat-delay",
+        json={"reset_to_channel_default": True},
+    )
+    assert chat_reset.json()["chat_delay_seconds"] == 1.5
+    bookmark_reset = client.put(
+        f"/media/{media_id}/bookmark-shift",
+        json={"reset_to_channel_default": True},
+    )
+    assert bookmark_reset.json()["shift_seconds"] == -2.5
 
     deleted = client.delete(f"/bookmarks/{replay['id']}")
     assert deleted.status_code == 200

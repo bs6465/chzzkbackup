@@ -3,6 +3,11 @@
 <section class="page-heading"><div><a href="/library">← 보관함</a><h2>{{ item.title }}</h2><p class="muted">{{ item.channel_name }} · {{ item.started_at|kst_datetime }}</p></div><a class="button-link" href="/media/{{ item.id }}/download">원본 다운로드</a></section>
 <section class="player-layout">
   <div class="video-panel"><video id="player" controls preload="metadata" src="/media/{{ item.id }}/video"></video>
+    <div class="player-seek-controls" role="group" aria-label="영상 앞뒤 이동">
+      <button type="button" data-seek-seconds="-10" aria-label="10초 뒤로 이동">−10초</button>
+      <button type="button" data-seek-seconds="10" aria-label="10초 앞으로 이동">+10초</button>
+      <span class="muted">←/→ 5초 · Shift+←/→ 10초</span>
+    </div>
     <div class="player-capture">
       <button type="button" id="capture-frame" data-media-title="{{ item.title }}" disabled>스크린샷 저장 (S)</button>
       <output id="capture-status" class="muted" role="status" aria-live="polite">영상 준비 중…</output>
@@ -23,7 +28,7 @@
           <output data-bookmark-shift-value aria-live="polite">+0.0초</output>
           <button type="button" data-bookmark-shift-action="earlier" aria-label="모든 북마크를 0.5초 앞으로 이동">−0.5초</button>
           <button type="button" data-bookmark-shift-action="later" aria-label="모든 북마크를 0.5초 뒤로 이동">+0.5초</button>
-          <button type="button" data-bookmark-shift-action="reset" aria-label="북마크 전체 시간 보정 초기화" disabled>초기화</button>
+          <button type="button" data-bookmark-shift-action="reset" aria-label="북마크 시간을 현재 채널 기본값으로 초기화" disabled>채널 기본</button>
         </div>
       </div>
       <form class="bookmark-add-form" data-bookmark-add>
@@ -33,7 +38,8 @@
           placeholder="북마크 메모 (선택)"
           aria-label="북마크 내용"
         >
-        <button type="submit">현재 위치 북마크</button>
+        <button type="submit" data-bookmark-kind="point">현재 위치 북마크</button>
+        <button type="submit" data-bookmark-kind="range">구간 시작</button>
       </form>
       <output data-bookmark-status role="status" aria-live="polite"></output>
       <div class="bookmark-list" data-bookmark-list>
@@ -85,12 +91,12 @@
         <output id="chat-delay-value" aria-live="polite">+0.0초</output>
         <button type="button" id="chat-delay-earlier" aria-label="채팅을 0.5초 일찍 표시">−0.5초</button>
         <button type="button" id="chat-delay-later" aria-label="채팅을 0.5초 늦게 표시">+0.5초</button>
-        <button type="button" id="chat-delay-reset" aria-label="채팅 딜레이 초기화" disabled>초기화</button>
+        <button type="button" id="chat-delay-reset" aria-label="채팅 딜레이를 현재 채널 기본값으로 초기화" disabled>채널 기본</button>
       </div>
       <label><input id="auto-scroll" type="checkbox" checked> 자동 스크롤</label>
     </div>
     <div id="chat-types" class="type-filters"></div><div id="chat-list" class="chat-timeline"><p class="muted">채팅을 불러오는 중…</p></div>
   </aside>
 </section>
-<script>window.CHZZK_MEDIA_ID={{ item.id }};</script><script src="/static/player.js?v={{ version }}"></script><script src="/static/bookmarks.js?v={{ version }}"></script>
+<script>window.CHZZK_MEDIA_ID={{ item.id }};window.CHZZK_MEDIA_SYNC={{ item.sync|tojson }};</script><script src="/static/player.js?v={{ version }}"></script><script src="/static/bookmarks.js?v={{ version }}"></script>
 {% endblock %}

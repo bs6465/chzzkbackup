@@ -1,5 +1,5 @@
 (() => {
-  const CHAT_DELAY_KEY = "chzzkbackup-chat-delay-seconds";
+  const LEGACY_CHAT_DELAY_KEY = "chzzkbackup-chat-delay-seconds";
   const CHAT_DELAY_MIN = -60;
   const CHAT_DELAY_MAX = 60;
   const CHAT_DELAY_STEP = 0.5;
@@ -54,6 +54,25 @@
   };
   const screenshotFilename = (title, currentTime) =>
     `${sanitizeFilenameBase(title)}_${formatFilenameTime(currentTime)}.png`;
+  const clampedSeekTime = (currentTime, delta, duration) => {
+    const current = Number(currentTime);
+    const change = Number(delta);
+    const maximum = Number(duration);
+    const target = Math.max(0, (Number.isFinite(current) ? current : 0) + (Number.isFinite(change) ? change : 0));
+    return Number.isFinite(maximum) && maximum >= 0 ? Math.min(maximum, target) : target;
+  };
+  const shouldHandleSeekShortcut = event => {
+    if (
+      !["ArrowLeft", "ArrowRight"].includes(String(event.key || "")) ||
+      event.altKey || event.ctrlKey || event.metaKey || event.repeat
+    ) return false;
+    const target = event.target || {};
+    const tag = String(target.tagName || "").toLowerCase();
+    return !["input", "textarea", "select", "button"].includes(tag)
+      && !target.isContentEditable;
+  };
+  const seekStepForEvent = event => (event.shiftKey ? 10 : 5)
+    * (event.key === "ArrowLeft" ? -1 : 1);
 
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
@@ -62,6 +81,9 @@
       formatTimelineTime,
       normalizeChatDelay,
       screenshotFilename,
+      clampedSeekTime,
+      seekStepForEvent,
+      shouldHandleSeekShortcut,
     };
   }
   if (typeof document === "undefined") return;
@@ -80,7 +102,11 @@
   const delayReset = document.getElementById("chat-delay-reset");
   const delayValue = document.getElementById("chat-delay-value");
   let rows = [], enabled = new Set(), visible = [], active = -1;
-  let chatDelay = 0;
+  const mediaSync = window.CHZZK_MEDIA_SYNC || {};
+  let chatDelay = normalizeChatDelay(mediaSync.chat_delay_seconds);
+  const channelDefaultChatDelay = normalizeChatDelay(
+    mediaSync.channel_default_chat_delay_seconds
+  );
   let chatLoaded = false;
   let captureStatusTimer;
 
@@ -106,7 +132,10 @@
     const element = list.querySelector(`[data-index='${found}']`);
     if (element) {
       element.classList.add("current");
-      if (autoScroll.checked) element.scrollIntoView({ block: "center" });
+      if (autoScroll.checked) {
+        const top = element.offsetTop - (list.clientHeight - element.offsetHeight) / 2;
+        list.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+      }
     }
   };
   const render = () => {
@@ -125,26 +154,36 @@
     delayValue.textContent = formatDelay(chatDelay);
     delayEarlier.disabled = chatDelay <= CHAT_DELAY_MIN;
     delayLater.disabled = chatDelay >= CHAT_DELAY_MAX;
-    delayReset.disabled = chatDelay === 0;
+    delayReset.disabled = chatDelay === channelDefaultChatDelay;
   };
-  const persistChatDelay = () => {
+  const setChatDelay = async (value, resetToChannelDefault = false) => {
+    const previous = chatDelay;
+    delayEarlier.disabled = true;
+    delayLater.disabled = true;
+    delayReset.disabled = true;
     try {
-      localStorage.setItem(CHAT_DELAY_KEY, String(chatDelay));
+      const response = await fetch(`/media/${window.CHZZK_MEDIA_ID}/chat-delay`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(resetToChannelDefault
+          ? { reset_to_channel_default: true }
+          : { delay_seconds: normalizeChatDelay(value) }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || "채팅 보정값 저장 실패");
+      chatDelay = normalizeChatDelay(payload.chat_delay_seconds);
+      if (chatLoaded) render();
     } catch (_error) {
-      // The in-memory value remains usable when browser storage is unavailable.
+      chatDelay = previous;
+      delayValue.textContent = "저장 실패";
+      window.setTimeout(updateDelayControls, 2000);
+    } finally {
+      updateDelayControls();
     }
   };
-  const setChatDelay = value => {
-    chatDelay = normalizeChatDelay(value);
-    persistChatDelay();
-    updateDelayControls();
-    if (chatLoaded) render();
-  };
   try {
-    chatDelay = normalizeChatDelay(localStorage.getItem(CHAT_DELAY_KEY));
-  } catch (_error) {
-    chatDelay = 0;
-  }
+    localStorage.removeItem(LEGACY_CHAT_DELAY_KEY);
+  } catch (_error) { /* Legacy browser value is intentionally discarded. */ }
   updateDelayControls();
 
   fetch(`/media/${window.CHZZK_MEDIA_ID}/chat`).then(response => response.json()).then(data => {
@@ -175,7 +214,20 @@
   player.addEventListener("timeupdate", syncChatToPlayer);
   delayEarlier.addEventListener("click", () => setChatDelay(chatDelay - CHAT_DELAY_STEP));
   delayLater.addEventListener("click", () => setChatDelay(chatDelay + CHAT_DELAY_STEP));
-  delayReset.addEventListener("click", () => setChatDelay(0));
+  delayReset.addEventListener("click", () => setChatDelay(channelDefaultChatDelay, true));
+
+  const seekBy = seconds => {
+    if (player.readyState < 1) return;
+    player.currentTime = clampedSeekTime(player.currentTime, seconds, player.duration);
+  };
+  document.querySelectorAll("[data-seek-seconds]").forEach(button => {
+    button.addEventListener("click", () => seekBy(Number(button.dataset.seekSeconds)));
+  });
+  document.addEventListener("keydown", event => {
+    if (!shouldHandleSeekShortcut(event)) return;
+    event.preventDefault();
+    seekBy(seekStepForEvent(event));
+  });
 
   const formatClipTime = value => {
     const total = normalizedSeconds(value);

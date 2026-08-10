@@ -104,6 +104,11 @@ main {
 .summary-card span { color: var(--muted); }
 .summary-card.warn { border-left-color: var(--warn); }
 .channel-settings { margin-top: 16px; }
+.channel-row { flex-wrap:wrap; }
+.channel-sync-settings { flex:1 0 100%; border:1px solid var(--line); border-radius:7px; }
+.channel-sync-settings > summary { cursor:pointer; padding:8px 10px; color:var(--muted); font-size:13px; }
+.channel-sync-settings[open] > summary { border-bottom:1px solid var(--line); }
+.channel-sync-settings form { display:grid; grid-template-columns:minmax(120px,1fr) minmax(120px,1fr) auto auto; align-items:end; gap:8px; padding:10px; }
 .settings-panel { margin: 16px 0; }
 .settings-panel > summary { cursor: pointer; font-weight: 700; padding: 14px 0; }
 .settings-grid { margin-top: 4px; }
@@ -142,6 +147,8 @@ main {
 .player-layout { display:grid; grid-template-columns:minmax(0,2fr) minmax(360px,1fr); gap:16px; min-height:70vh; }
 .video-panel, .chat-panel { border:1px solid var(--line); border-radius:8px; background:var(--panel); padding:12px; }
 .video-panel video { width:100%; max-height:72vh; background:#000; }
+.player-seek-controls { display:flex; flex-wrap:wrap; align-items:center; gap:7px; margin-top:10px; }
+.player-seek-controls button { border:1px solid var(--line); background:transparent; color:var(--text); }
 .player-capture { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-height:36px; margin-top:10px; }
 .player-capture output { font-size:13px; overflow-wrap:anywhere; }
 .rename-player { margin-top:12px; }
@@ -149,7 +156,7 @@ main {
 .player-tools h2 { margin:0; }
 .bookmark-heading { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:10px; }
 .bookmark-heading > div:first-child { display:grid; gap:4px; }
-.bookmark-add-form, .live-bookmark-add { display:grid; grid-template-columns:minmax(120px,1fr) auto; gap:8px; }
+.bookmark-add-form, .live-bookmark-add { display:grid; grid-template-columns:minmax(120px,1fr) auto auto; gap:8px; }
 .bookmark-shift-controls { display:flex; flex-wrap:wrap; align-items:center; gap:5px; }
 .bookmark-shift-controls output { min-width:56px; color:var(--muted); font-size:13px; font-variant-numeric:tabular-nums; text-align:center; }
 .bookmark-shift-controls button { border:1px solid var(--line); padding:7px 8px; background:transparent; color:var(--text); }
@@ -162,7 +169,8 @@ main {
 .bookmark-row-heading { display:flex; align-items:center; gap:7px; }
 .bookmark-seek { min-width:72px; border:1px solid var(--accent); padding:6px 9px; background:transparent; color:var(--accent); font-variant-numeric:tabular-nums; }
 .bookmark-live-time { min-width:72px; color:var(--accent); font-variant-numeric:tabular-nums; }
-.bookmark-edit-form { display:grid; grid-template-columns:96px minmax(140px,1fr) auto auto auto; align-items:center; gap:6px; }
+.bookmark-edit-form { display:grid; grid-template-columns:96px minmax(120px,1fr) repeat(4,auto); align-items:center; gap:6px; }
+.bookmark-range-edit { grid-template-columns:96px 96px minmax(120px,1fr) repeat(5,auto); }
 .bookmark-edit-form button { padding:7px 9px; }
 .bookmark-time-input { font-variant-numeric:tabular-nums; }
 .live-recording-row { flex-wrap:wrap; align-items:flex-start; }
@@ -186,7 +194,7 @@ main {
 .chat-delay-controls button { border:1px solid var(--line); padding:7px 8px; background:transparent; color:var(--text); }
 .chat-delay-controls button:disabled { cursor:not-allowed; opacity:.5; }
 .type-filters { display:flex; flex-wrap:wrap; gap:10px; padding:10px 0; color:var(--muted); font-size:13px; }
-.chat-timeline { height:65vh; overflow:auto; border-top:1px solid var(--line); }
+.chat-timeline { height:65vh; overflow:auto; overscroll-behavior:contain; border-top:1px solid var(--line); }
 .chat-row { display:grid; grid-template-columns:72px minmax(0,1fr); width:100%; text-align:left; border-radius:0; border-bottom:1px solid var(--line); background:transparent; color:var(--text); white-space:normal; }
 .chat-row time { color:var(--muted); font-variant-numeric:tabular-nums; }
 .chat-row span { display:grid; gap:2px; }
@@ -456,7 +464,7 @@ progress::-moz-progress-bar {
   }
   .summary-grid, .media-grid { grid-template-columns:1fr 1fr; }
   .filter-bar, .player-layout { grid-template-columns:1fr; }
-  .bulk-toolbar, .clip-form, .retention-policy { display:grid; grid-template-columns:1fr; }
+  .bulk-toolbar, .clip-form, .retention-policy, .channel-sync-settings form { display:grid; grid-template-columns:1fr; }
   .bookmark-add-form, .live-bookmark-add, .bookmark-edit-form { grid-template-columns:1fr; }
   .bookmark-heading, .bookmark-shift-controls { align-items:stretch; }
   .bookmark-shift-controls output { align-self:center; }
@@ -468,4 +476,6 @@ progress::-moz-progress-bar {
   .media-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }
   .filter-bar { grid-template-columns:repeat(3,1fr); }
   .retention-policy { grid-template-columns:repeat(3,1fr); }
+  .bookmark-edit-form, .bookmark-range-edit { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .bookmark-content-input { grid-column:1 / -1; }
 }

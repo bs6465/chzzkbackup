@@ -26,7 +26,7 @@
   </div>
 </details>
 
-<section class="grid channel-settings">
+<section class="grid channel-settings" id="channel-settings">
   <div class="panel">
     <h2>새 방송 채널 추가</h2>
     <form class="inline-form" method="post" action="/channels">
@@ -40,7 +40,7 @@
     </form>
     <div class="list">
       {% for channel in channels %}
-      <div class="row">
+      <div class="row channel-row">
         <div>
           <strong>{{ channel.name }}</strong>
           <span>{{ channel.platform|platform_label }} · {{ channel.display_id or channel.id }}</span>
@@ -55,6 +55,19 @@
         <form method="post" action="/channels/{{ channel.id }}/delete">
           <button class="danger" type="submit">삭제</button>
         </form>
+        <details class="channel-sync-settings">
+          <summary>싱크</summary>
+          <form method="post" action="/channels/{{ channel.id }}/sync-defaults">
+            <label>채팅 기본
+              <input name="chat_delay_seconds" type="number" min="-60" max="60" step="0.5" value="{{ '%.1f'|format(channel.default_chat_delay_seconds or 0) }}" required>
+            </label>
+            <label>북마크 기본
+              <input name="bookmark_shift_seconds" type="number" min="-60" max="60" step="0.5" value="{{ '%.1f'|format(channel.default_bookmark_shift_seconds or 0) }}" required>
+            </label>
+            <span class="muted">＋ 값은 더 늦게 표시</span>
+            <button type="submit">기본값 저장</button>
+          </form>
+        </details>
       </div>
       {% else %}
       <p class="muted">등록된 채널이 없습니다.</p>

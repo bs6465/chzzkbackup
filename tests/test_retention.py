@@ -43,7 +43,7 @@ def test_current_schema_backfills_unlimited_registered_and_discovered_policies(t
         started_at="2026-06-01T00:00:00+09:00",
     )
 
-    assert database.query_one("PRAGMA user_version")["user_version"] == 5
+    assert database.query_one("PRAGMA user_version")["user_version"] == 6
     registered = database.get_media_item(registered_id)
     discovered = database.get_media_item(discovered_id)
     assert registered["retention_policy_key"] == "registered:chzzk:stable-id"

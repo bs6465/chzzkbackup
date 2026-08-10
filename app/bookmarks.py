@@ -13,6 +13,7 @@ BOOKMARK_CONTENT_MAX_LENGTH = 500
 BOOKMARK_SHIFT_MIN = -60.0
 BOOKMARK_SHIFT_MAX = 60.0
 BOOKMARK_SHIFT_STEP = 0.5
+BOOKMARK_KINDS = {"point", "range"}
 ACTIVE_RECORDING_STATUSES = {"recording", "retrying"}
 
 
@@ -39,13 +40,13 @@ def normalize_bookmark_content(value: str) -> str:
     return content
 
 
-def normalize_bookmark_shift(value: Any) -> float:
+def normalize_sync_seconds(value: Any, label: str = "시간 보정값") -> float:
     try:
         parsed = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
-        raise BookmarkValidationError("북마크 보정값이 올바르지 않습니다.") from exc
+        raise BookmarkValidationError(f"{label}이 올바르지 않습니다.") from exc
     if not parsed.is_finite():
-        raise BookmarkValidationError("북마크 보정값이 올바르지 않습니다.")
+        raise BookmarkValidationError(f"{label}이 올바르지 않습니다.")
     steps = (parsed / Decimal(str(BOOKMARK_SHIFT_STEP))).quantize(
         Decimal("1"), rounding=ROUND_HALF_UP
     )
@@ -53,6 +54,17 @@ def normalize_bookmark_shift(value: Any) -> float:
     normalized = max(Decimal(str(BOOKMARK_SHIFT_MIN)), normalized)
     normalized = min(Decimal(str(BOOKMARK_SHIFT_MAX)), normalized)
     return float(normalized)
+
+
+def normalize_bookmark_shift(value: Any) -> float:
+    return normalize_sync_seconds(value, "북마크 보정값")
+
+
+def normalize_bookmark_kind(value: Any) -> str:
+    kind = str(value or "point").strip().lower()
+    if kind not in BOOKMARK_KINDS:
+        raise BookmarkValidationError("북마크 종류가 올바르지 않습니다.")
+    return kind
 
 
 def validate_offset_seconds(value: Any) -> float:
@@ -152,7 +164,6 @@ class BookmarkService:
         if not marked:
             return 0.0
         windows, elapsed = self._segment_windows(session_id)
-
         current_started = _parse_datetime(session.get("current_segment_started_at"))
         if (
             include_current_segment
@@ -166,12 +177,10 @@ class BookmarkService:
         for started, ended, start_offset, end_offset in windows:
             if started <= marked <= ended:
                 return round(
-                    min(end_offset, start_offset + (marked - started).total_seconds()),
-                    3,
+                    min(end_offset, start_offset + (marked - started).total_seconds()), 3
                 )
             boundaries.append((abs((marked - started).total_seconds()), start_offset))
             boundaries.append((abs((marked - ended).total_seconds()), end_offset))
-
         if current_started:
             boundaries.append((abs((marked - current_started).total_seconds()), elapsed))
         if boundaries:
@@ -186,29 +195,46 @@ class BookmarkService:
         session_id = media.get("session_id")
         if session_id is None:
             return
-        for row in self.db.query_all(
-            """
-            SELECT * FROM video_bookmarks
-            WHERE session_id = ? AND (media_id IS NULL OR offset_seconds IS NULL)
-            ORDER BY id
-            """,
+        rows = self.db.query_all(
+            "SELECT * FROM video_bookmarks WHERE session_id = ? ORDER BY id",
             (int(session_id),),
-        ):
-            offset = row.get("offset_seconds")
-            if offset is None:
-                offset = self.map_live_timestamp(
-                    int(session_id),
-                    str(row.get("marked_at") or media.get("started_at") or ""),
-                    include_current_segment=False,
+        )
+        for row in rows:
+            updates: list[str] = []
+            params: list[Any] = []
+            if row.get("media_id") is None:
+                updates.append("media_id = ?")
+                params.append(media_id)
+            if row.get("offset_seconds") is None:
+                updates.append("offset_seconds = ?")
+                params.append(
+                    self.map_live_timestamp(
+                        int(session_id),
+                        str(row.get("marked_at") or media.get("started_at") or ""),
+                        include_current_segment=False,
+                    )
                 )
-            self.db.execute(
-                """
-                UPDATE video_bookmarks
-                SET media_id = ?, offset_seconds = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (media_id, float(offset), utc_now_iso(), int(row["id"])),
-            )
+            if (
+                normalize_bookmark_kind(row.get("kind")) == "range"
+                and row.get("end_marked_at")
+                and row.get("end_offset_seconds") is None
+            ):
+                updates.append("end_offset_seconds = ?")
+                params.append(
+                    self.map_live_timestamp(
+                        int(session_id),
+                        str(row["end_marked_at"]),
+                        include_current_segment=False,
+                    )
+                )
+            if updates:
+                updates.append("updated_at = ?")
+                params.extend([utc_now_iso(), int(row["id"])])
+                self.db.execute(
+                    f"UPDATE video_bookmarks SET {', '.join(updates)} WHERE id = ?",
+                    tuple(params),
+                )
+                self._normalize_range_order(int(row["id"]), include_current=False)
 
     def _duration(self, media: dict[str, Any]) -> float | None:
         try:
@@ -217,28 +243,109 @@ class BookmarkService:
             return None
         return duration if math.isfinite(duration) and duration >= 0 else None
 
+    def _channel_defaults(self, media: dict[str, Any]) -> tuple[float, float]:
+        channel_id = media.get("channel_id")
+        if not channel_id and media.get("session_id") is not None:
+            session = self.db.get_session(int(media["session_id"])) or {}
+            channel_id = session.get("channel_id")
+        channel = self.db.get_channel(str(channel_id)) if channel_id else None
+        return (
+            normalize_sync_seconds(
+                channel.get("default_chat_delay_seconds") or 0 if channel else 0,
+                "채팅 보정값",
+            ),
+            normalize_bookmark_shift(
+                channel.get("default_bookmark_shift_seconds") or 0 if channel else 0
+            ),
+        )
+
+    def media_sync(self, media_id: int) -> dict[str, Any]:
+        media = self._media_or_raise(media_id)
+        default_chat, default_bookmark = self._channel_defaults(media)
+        return {
+            "media_id": media_id,
+            "chat_delay_seconds": normalize_sync_seconds(
+                media.get("chat_delay_seconds") or 0, "채팅 보정값"
+            ),
+            "bookmark_shift_seconds": normalize_bookmark_shift(
+                media.get("bookmark_shift_seconds") or 0
+            ),
+            "channel_default_chat_delay_seconds": default_chat,
+            "channel_default_bookmark_shift_seconds": default_bookmark,
+            "minimum": BOOKMARK_SHIFT_MIN,
+            "maximum": BOOKMARK_SHIFT_MAX,
+            "step": BOOKMARK_SHIFT_STEP,
+        }
+
+    def _row_offsets(
+        self,
+        row: dict[str, Any],
+        *,
+        include_current: bool,
+    ) -> tuple[float, float | None, bool, bool]:
+        session_id = int(row["session_id"]) if row.get("session_id") is not None else None
+        start_resolved = row.get("offset_seconds") is not None
+        start = (
+            float(row["offset_seconds"])
+            if start_resolved
+            else self.map_live_timestamp(
+                int(session_id), str(row.get("marked_at") or ""),
+                include_current_segment=include_current,
+            )
+        )
+        kind = normalize_bookmark_kind(row.get("kind"))
+        end_complete = kind == "range" and (
+            row.get("end_offset_seconds") is not None or bool(row.get("end_marked_at"))
+        )
+        end_resolved = end_complete and row.get("end_offset_seconds") is not None
+        end: float | None = None
+        if end_complete:
+            end = (
+                float(row["end_offset_seconds"])
+                if end_resolved
+                else self.map_live_timestamp(
+                    int(session_id), str(row.get("end_marked_at") or ""),
+                    include_current_segment=include_current,
+                )
+            )
+        return start, end, start_resolved, end_resolved
+
     def _payload(
         self,
         row: dict[str, Any],
         *,
         raw_offset: float,
+        raw_end_offset: float | None,
         shift_seconds: float,
         duration_seconds: float | None,
         resolved: bool,
+        end_resolved: bool,
     ) -> dict[str, Any]:
+        kind = normalize_bookmark_kind(row.get("kind"))
         return {
             "id": int(row["id"]),
             "session_id": int(row["session_id"]) if row.get("session_id") is not None else None,
             "media_id": int(row["media_id"]) if row.get("media_id") is not None else None,
+            "kind": kind,
             "offset_seconds": round(float(raw_offset), 3),
             "effective_offset_seconds": effective_bookmark_offset(
                 raw_offset, shift_seconds, duration_seconds
             ),
+            "end_offset_seconds": (
+                round(float(raw_end_offset), 3) if raw_end_offset is not None else None
+            ),
+            "effective_end_offset_seconds": (
+                effective_bookmark_offset(raw_end_offset, shift_seconds, duration_seconds)
+                if raw_end_offset is not None else None
+            ),
             "content": str(row.get("content") or ""),
             "marked_at": row.get("marked_at"),
+            "end_marked_at": row.get("end_marked_at"),
             "created_at": row.get("created_at"),
             "updated_at": row.get("updated_at"),
             "resolved": resolved,
+            "end_resolved": end_resolved,
+            "complete": kind == "point" or raw_end_offset is not None,
         }
 
     def live_collection(self, session_id: int) -> dict[str, Any]:
@@ -248,23 +355,18 @@ class BookmarkService:
             "SELECT * FROM video_bookmarks WHERE session_id = ? ORDER BY id",
             (session_id,),
         ):
-            resolved = row.get("offset_seconds") is not None
-            raw_offset = (
-                float(row["offset_seconds"])
-                if resolved
-                else self.map_live_timestamp(
-                    session_id,
-                    str(row.get("marked_at") or ""),
-                    include_current_segment=True,
-                )
+            start, end, resolved, end_resolved = self._row_offsets(
+                row, include_current=True
             )
             bookmarks.append(
                 self._payload(
                     row,
-                    raw_offset=raw_offset,
+                    raw_offset=start,
+                    raw_end_offset=end,
                     shift_seconds=0,
                     duration_seconds=None,
                     resolved=resolved,
+                    end_resolved=end_resolved,
                 )
             )
         bookmarks.sort(key=lambda item: (item["effective_offset_seconds"], item["id"]))
@@ -283,24 +385,29 @@ class BookmarkService:
         duration = self._duration(media)
         bookmarks = []
         for row in self.db.query_all(
-            "SELECT * FROM video_bookmarks WHERE media_id = ? ORDER BY id",
-            (media_id,),
+            "SELECT * FROM video_bookmarks WHERE media_id = ? ORDER BY id", (media_id,)
         ):
-            raw_offset = float(row.get("offset_seconds") or 0)
+            start, end, _, _ = self._row_offsets(row, include_current=False)
             bookmarks.append(
                 self._payload(
                     row,
-                    raw_offset=raw_offset,
+                    raw_offset=start,
+                    raw_end_offset=end,
                     shift_seconds=shift,
                     duration_seconds=duration,
                     resolved=True,
+                    end_resolved=end is not None,
                 )
             )
         bookmarks.sort(key=lambda item: (item["effective_offset_seconds"], item["id"]))
+        sync = self.media_sync(media_id)
         return {
             "scope": "media",
             "media_id": media_id,
             "shift_seconds": shift,
+            "channel_default_shift_seconds": sync[
+                "channel_default_bookmark_shift_seconds"
+            ],
             "shift_min": BOOKMARK_SHIFT_MIN,
             "shift_max": BOOKMARK_SHIFT_MAX,
             "shift_step": BOOKMARK_SHIFT_STEP,
@@ -308,41 +415,60 @@ class BookmarkService:
             "bookmarks": bookmarks,
         }
 
-    def create_live_bookmark(self, session_id: int, content: str = "") -> dict[str, Any]:
+    def create_live_bookmark(
+        self, session_id: int, content: str = "", kind: str = "point"
+    ) -> dict[str, Any]:
         session = self._session_or_raise(session_id)
         if str(session.get("status")) not in ACTIVE_RECORDING_STATUSES:
             raise InactiveRecordingError("이미 종료된 방송에는 현재 시점을 체크할 수 없습니다.")
+        normalized_kind = normalize_bookmark_kind(kind)
         now = utc_now_iso()
         self.db.execute(
             """
             INSERT INTO video_bookmarks
-              (session_id, marked_at, content, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+              (session_id, kind, marked_at, content, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (session_id, now, normalize_bookmark_content(content), now, now),
+            (
+                session_id,
+                normalized_kind,
+                now,
+                normalize_bookmark_content(content),
+                now,
+                now,
+            ),
         )
         return self.live_collection(session_id)
 
-    def create_media_bookmark(
-        self, media_id: int, display_offset_seconds: Any, content: str = ""
-    ) -> dict[str, Any]:
-        media = self._media_or_raise(media_id)
-        display_offset = validate_offset_seconds(display_offset_seconds)
+    def _raw_media_offset(self, media: dict[str, Any], display_value: Any) -> float:
+        display_offset = validate_offset_seconds(display_value)
         duration = self._duration(media)
         if duration is not None:
             display_offset = min(display_offset, duration)
         shift = normalize_bookmark_shift(media.get("bookmark_shift_seconds") or 0)
-        raw_offset = display_offset - shift
+        return display_offset - shift
+
+    def create_media_bookmark(
+        self,
+        media_id: int,
+        display_offset_seconds: Any,
+        content: str = "",
+        kind: str = "point",
+    ) -> dict[str, Any]:
+        media = self._media_or_raise(media_id)
+        raw_offset = self._raw_media_offset(media, display_offset_seconds)
+        normalized_kind = normalize_bookmark_kind(kind)
         now = utc_now_iso()
         self.db.execute(
             """
             INSERT INTO video_bookmarks
-              (session_id, media_id, offset_seconds, content, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+              (session_id, media_id, kind, offset_seconds, content, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(media["session_id"]) if media.get("session_id") is not None else None,
                 media_id,
+                normalized_kind,
                 raw_offset,
                 normalize_bookmark_content(content),
                 now,
@@ -351,54 +477,112 @@ class BookmarkService:
         )
         return self.media_collection(media_id)
 
+    def _assert_active_live(self, media_id: int | None, session_id: int | None) -> None:
+        if media_id is not None or session_id is None:
+            raise BookmarkValidationError("현재 방송 시점은 녹화 중 북마크에만 사용할 수 있습니다.")
+        session = self._session_or_raise(session_id)
+        if str(session.get("status")) not in ACTIVE_RECORDING_STATUSES:
+            raise InactiveRecordingError("방송이 종료되어 현재 시점으로 바꿀 수 없습니다.")
+
+    def _normalize_range_order(self, bookmark_id: int, *, include_current: bool) -> None:
+        row = self._bookmark_or_raise(bookmark_id)
+        if normalize_bookmark_kind(row.get("kind")) != "range":
+            return
+        start, end, _, _ = self._row_offsets(row, include_current=include_current)
+        if end is None or end >= start:
+            return
+        self.db.execute(
+            """
+            UPDATE video_bookmarks
+            SET marked_at = ?, offset_seconds = ?,
+                end_marked_at = ?, end_offset_seconds = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                row.get("end_marked_at"),
+                row.get("end_offset_seconds"),
+                row.get("marked_at"),
+                row.get("offset_seconds"),
+                utc_now_iso(),
+                bookmark_id,
+            ),
+        )
+
     def update_bookmark(
         self,
         bookmark_id: int,
         *,
+        kind: str | None = None,
+        kind_provided: bool = False,
         content: str | None = None,
         content_provided: bool = False,
         display_offset_seconds: Any = None,
         offset_provided: bool = False,
+        end_display_offset_seconds: Any = None,
+        end_offset_provided: bool = False,
         use_current_live_time: bool = False,
+        use_current_live_end_time: bool = False,
     ) -> dict[str, Any]:
         row = self._bookmark_or_raise(bookmark_id)
         updates: list[str] = []
         params: list[Any] = []
+        media_id = int(row["media_id"]) if row.get("media_id") is not None else None
+        session_id = int(row["session_id"]) if row.get("session_id") is not None else None
+        target_kind = normalize_bookmark_kind(kind if kind_provided else row.get("kind"))
+
+        if kind_provided:
+            updates.append("kind = ?")
+            params.append(target_kind)
+            if target_kind == "point":
+                updates.extend(["end_marked_at = NULL", "end_offset_seconds = NULL"])
         if content_provided:
             updates.append("content = ?")
             params.append(normalize_bookmark_content(content or ""))
 
-        media_id = int(row["media_id"]) if row.get("media_id") is not None else None
-        session_id = int(row["session_id"]) if row.get("session_id") is not None else None
         if use_current_live_time:
-            if media_id is not None or session_id is None:
-                raise BookmarkValidationError("현재 방송 시점은 녹화 중 북마크에만 사용할 수 있습니다.")
-            session = self._session_or_raise(session_id)
-            if str(session.get("status")) not in ACTIVE_RECORDING_STATUSES:
-                raise InactiveRecordingError("방송이 종료되어 현재 시점으로 바꿀 수 없습니다.")
+            self._assert_active_live(media_id, session_id)
             updates.extend(["marked_at = ?", "offset_seconds = NULL"])
             params.append(utc_now_iso())
         elif offset_provided:
-            display_offset = validate_offset_seconds(display_offset_seconds)
             if media_id is not None:
-                media = self._media_or_raise(media_id)
-                duration = self._duration(media)
-                if duration is not None:
-                    display_offset = min(display_offset, duration)
-                shift = normalize_bookmark_shift(media.get("bookmark_shift_seconds") or 0)
-                display_offset -= shift
+                raw_start = self._raw_media_offset(
+                    self._media_or_raise(media_id), display_offset_seconds
+                )
+            else:
+                raw_start = validate_offset_seconds(display_offset_seconds)
             updates.append("offset_seconds = ?")
-            params.append(display_offset)
+            params.append(raw_start)
+
+        if use_current_live_end_time:
+            if target_kind != "range":
+                raise BookmarkValidationError("구간 북마크에만 끝 시각을 설정할 수 있습니다.")
+            self._assert_active_live(media_id, session_id)
+            updates.extend(["end_marked_at = ?", "end_offset_seconds = NULL"])
+            params.append(utc_now_iso())
+        elif end_offset_provided:
+            if target_kind != "range":
+                raise BookmarkValidationError("구간 북마크에만 끝 시각을 설정할 수 있습니다.")
+            if end_display_offset_seconds is None:
+                updates.extend(["end_marked_at = NULL", "end_offset_seconds = NULL"])
+            else:
+                if media_id is not None:
+                    raw_end = self._raw_media_offset(
+                        self._media_or_raise(media_id), end_display_offset_seconds
+                    )
+                else:
+                    raw_end = validate_offset_seconds(end_display_offset_seconds)
+                updates.extend(["end_marked_at = NULL", "end_offset_seconds = ?"])
+                params.append(raw_end)
 
         if not updates:
             raise BookmarkValidationError("수정할 북마크 값이 없습니다.")
         updates.append("updated_at = ?")
-        params.append(utc_now_iso())
-        params.append(bookmark_id)
+        params.extend([utc_now_iso(), bookmark_id])
         self.db.execute(
             f"UPDATE video_bookmarks SET {', '.join(updates)} WHERE id = ?",
             tuple(params),
         )
+        self._normalize_range_order(bookmark_id, include_current=media_id is None)
         return (
             self.media_collection(media_id)
             if media_id is not None
@@ -416,9 +600,18 @@ class BookmarkService:
             else self.live_collection(int(session_id))
         )
 
-    def set_media_shift(self, media_id: int, shift_seconds: Any) -> dict[str, Any]:
-        self._media_or_raise(media_id)
-        normalized = normalize_bookmark_shift(shift_seconds)
+    def set_media_shift(
+        self,
+        media_id: int,
+        shift_seconds: Any = 0,
+        *,
+        reset_to_channel_default: bool = False,
+    ) -> dict[str, Any]:
+        media = self._media_or_raise(media_id)
+        if reset_to_channel_default:
+            _, normalized = self._channel_defaults(media)
+        else:
+            normalized = normalize_bookmark_shift(shift_seconds)
         self.db.execute(
             """
             UPDATE media_items
@@ -428,3 +621,21 @@ class BookmarkService:
             (normalized, utc_now_iso(), media_id),
         )
         return self.media_collection(media_id)
+
+    def set_media_chat_delay(
+        self,
+        media_id: int,
+        delay_seconds: Any = 0,
+        *,
+        reset_to_channel_default: bool = False,
+    ) -> dict[str, Any]:
+        media = self._media_or_raise(media_id)
+        if reset_to_channel_default:
+            normalized, _ = self._channel_defaults(media)
+        else:
+            normalized = normalize_sync_seconds(delay_seconds, "채팅 보정값")
+        self.db.execute(
+            "UPDATE media_items SET chat_delay_seconds = ?, updated_at = ? WHERE id = ?",
+            (normalized, utc_now_iso(), media_id),
+        )
+        return self.media_sync(media_id)

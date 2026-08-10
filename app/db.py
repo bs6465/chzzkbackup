@@ -12,7 +12,7 @@ from typing import Any
 from . import config
 from .utils import ensure_storage_dirs, recording_name, sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class Database:
@@ -60,6 +60,8 @@ class Database:
                   display_id TEXT,
                   name TEXT NOT NULL,
                   active INTEGER NOT NULL DEFAULT 1,
+                  default_chat_delay_seconds REAL NOT NULL DEFAULT 0,
+                  default_bookmark_shift_seconds REAL NOT NULL DEFAULT 0,
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
@@ -89,6 +91,8 @@ class Database:
                   chat_jsonl_path TEXT,
                   chat_csv_path TEXT,
                   error TEXT,
+                  chat_delay_seconds REAL NOT NULL DEFAULT 0,
+                  bookmark_shift_seconds REAL NOT NULL DEFAULT 0,
                   FOREIGN KEY(channel_id) REFERENCES channels(id) ON DELETE CASCADE
                 );
 
@@ -137,6 +141,7 @@ class Database:
                 CREATE TABLE IF NOT EXISTS media_items (
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   session_id INTEGER,
+                  channel_id TEXT,
                   platform TEXT NOT NULL DEFAULT 'chzzk',
                   channel_name TEXT NOT NULL,
                   title TEXT NOT NULL,
@@ -217,12 +222,16 @@ class Database:
                   id INTEGER PRIMARY KEY AUTOINCREMENT,
                   session_id INTEGER,
                   media_id INTEGER,
+                  kind TEXT NOT NULL DEFAULT 'point',
                   marked_at TEXT,
                   offset_seconds REAL,
+                  end_marked_at TEXT,
+                  end_offset_seconds REAL,
                   content TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL,
                   CHECK(session_id IS NOT NULL OR media_id IS NOT NULL),
+                  CHECK(kind IN ('point', 'range')),
                   FOREIGN KEY(session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE,
                   FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
                 );
@@ -253,6 +262,8 @@ class Database:
                 {
                     "platform": "TEXT DEFAULT 'chzzk'",
                     "display_id": "TEXT",
+                    "default_chat_delay_seconds": "REAL NOT NULL DEFAULT 0",
+                    "default_bookmark_shift_seconds": "REAL NOT NULL DEFAULT 0",
                 },
             )
             self._ensure_columns(
@@ -265,15 +276,27 @@ class Database:
                     "retry_count": "INTEGER DEFAULT 0",
                     "next_retry_at": "TEXT",
                     "current_segment_started_at": "TEXT",
+                    "chat_delay_seconds": "REAL NOT NULL DEFAULT 0",
+                    "bookmark_shift_seconds": "REAL NOT NULL DEFAULT 0",
                 },
             )
             self._ensure_columns(
                 "media_items",
                 {
+                    "channel_id": "TEXT",
                     "retention_policy_key": "TEXT",
                     "retention_override": "TEXT NOT NULL DEFAULT 'inherit'",
                     "retention_expires_at": "TEXT",
+                    "chat_delay_seconds": "REAL NOT NULL DEFAULT 0",
                     "bookmark_shift_seconds": "REAL NOT NULL DEFAULT 0",
+                },
+            )
+            self._ensure_columns(
+                "video_bookmarks",
+                {
+                    "kind": "TEXT NOT NULL DEFAULT 'point'",
+                    "end_marked_at": "TEXT",
+                    "end_offset_seconds": "REAL",
                 },
             )
             self._ensure_columns(
@@ -293,6 +316,29 @@ class Database:
                 "UPDATE recording_sessions SET channel_display_id = channel_id WHERE channel_display_id IS NULL"
             )
             self._backfill_retention_policies()
+            self._conn.execute(
+                """
+                UPDATE media_items
+                SET channel_id = (
+                  SELECT recording_sessions.channel_id
+                  FROM recording_sessions
+                  WHERE recording_sessions.id = media_items.session_id
+                )
+                WHERE channel_id IS NULL AND session_id IS NOT NULL
+                """
+            )
+            self._conn.execute(
+                """
+                UPDATE media_items
+                SET channel_id = (
+                  SELECT channels.id FROM channels
+                  WHERE channels.platform = media_items.platform
+                    AND channels.name = media_items.channel_name COLLATE NOCASE
+                  ORDER BY channels.id LIMIT 1
+                )
+                WHERE channel_id IS NULL
+                """
+            )
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._chmod_private()
 
@@ -483,6 +529,29 @@ class Database:
             (int(active), utc_now_iso(), channel_id),
         )
 
+    def set_channel_sync_defaults(
+        self,
+        channel_id: str,
+        chat_delay_seconds: float,
+        bookmark_shift_seconds: float,
+    ) -> dict[str, Any] | None:
+        self.execute(
+            """
+            UPDATE channels
+            SET default_chat_delay_seconds = ?,
+                default_bookmark_shift_seconds = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                chat_delay_seconds,
+                bookmark_shift_seconds,
+                utc_now_iso(),
+                channel_id,
+            ),
+        )
+        return self.get_channel(channel_id)
+
     def delete_channel(self, channel_id: str) -> None:
         self.execute("DELETE FROM channels WHERE id = ?", (channel_id,))
 
@@ -549,6 +618,11 @@ class Database:
         channel_display_id: str | None = None,
     ) -> int:
         channel_display_id = channel_display_id or channel_id
+        channel = self.get_channel(channel_id) or {}
+        chat_delay_seconds = float(channel.get("default_chat_delay_seconds") or 0)
+        bookmark_shift_seconds = float(
+            channel.get("default_bookmark_shift_seconds") or 0
+        )
         cur = self.execute(
             """
             INSERT INTO recording_sessions
@@ -566,9 +640,11 @@ class Database:
               chat_jsonl_temp_path,
               chat_csv_temp_path,
               chat_jsonl_path,
-              chat_csv_path
+              chat_csv_path,
+              chat_delay_seconds,
+              bookmark_shift_seconds
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'recording', ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'recording', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 platform,
@@ -584,6 +660,8 @@ class Database:
                 str(chat_csv_temp_path or chat_csv_path),
                 str(chat_jsonl_path),
                 str(chat_csv_path),
+                chat_delay_seconds,
+                bookmark_shift_seconds,
             ),
         )
         return int(cur.lastrowid)
@@ -961,6 +1039,7 @@ class Database:
         started_at: str,
         platform: str = "chzzk",
         session_id: int | None = None,
+        channel_id: str | None = None,
         chat_jsonl_path: Path | None = None,
         chat_csv_path: Path | None = None,
         thumbnail_path: Path | None = None,
@@ -970,6 +1049,15 @@ class Database:
         retention_policy_key: str | None = None,
     ) -> int:
         now = utc_now_iso()
+        session = self.get_session(session_id) if session_id is not None else None
+        if not channel_id and session and session.get("channel_id"):
+            channel_id = str(session["channel_id"])
+        chat_delay_seconds = float(
+            session.get("chat_delay_seconds") or 0 if session else 0
+        )
+        bookmark_shift_seconds = float(
+            session.get("bookmark_shift_seconds") or 0 if session else 0
+        )
         if not retention_policy_key:
             existing = self.query_one(
                 "SELECT retention_policy_key FROM media_items WHERE video_path = ?",
@@ -987,12 +1075,14 @@ class Database:
         self.execute(
             """
             INSERT INTO media_items
-            (session_id, platform, channel_name, title, started_at, video_path,
+            (session_id, channel_id, platform, channel_name, title, started_at, video_path,
              chat_jsonl_path, chat_csv_path, thumbnail_path, duration_seconds,
-             size_bytes, status, indexed_at, updated_at, retention_policy_key)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             size_bytes, status, indexed_at, updated_at, retention_policy_key,
+             chat_delay_seconds, bookmark_shift_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(video_path) DO UPDATE SET
               session_id = COALESCE(excluded.session_id, media_items.session_id),
+              channel_id = COALESCE(excluded.channel_id, media_items.channel_id),
               platform = excluded.platform, channel_name = excluded.channel_name,
               title = excluded.title, started_at = excluded.started_at,
               chat_jsonl_path = COALESCE(excluded.chat_jsonl_path, media_items.chat_jsonl_path),
@@ -1004,11 +1094,12 @@ class Database:
               updated_at = excluded.updated_at
             """,
             (
-                session_id, platform, channel_name, title, started_at, str(video_path),
+                session_id, channel_id, platform, channel_name, title, started_at, str(video_path),
                 str(chat_jsonl_path) if chat_jsonl_path else None,
                 str(chat_csv_path) if chat_csv_path else None,
                 str(thumbnail_path) if thumbnail_path else None,
                 duration_seconds, size_bytes, status, now, now, retention_policy_key,
+                chat_delay_seconds, bookmark_shift_seconds,
             ),
         )
         row = self.query_one("SELECT id FROM media_items WHERE video_path = ?", (str(video_path),))

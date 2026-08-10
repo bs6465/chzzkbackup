@@ -51,11 +51,24 @@
   const currentBookmarkIndex = (bookmarks, currentTime) => {
     const now = Number(currentTime);
     if (!Number.isFinite(now)) return -1;
-    let current = -1;
+    let containing = -1;
+    let containingStart = -Infinity;
+    let passed = -1;
+    let passedStart = -Infinity;
     bookmarks.forEach((bookmark, index) => {
-      if (Number(bookmark.effective_offset_seconds) <= now) current = index;
+      const start = Number(bookmark.effective_offset_seconds);
+      if (!Number.isFinite(start) || start > now) return;
+      if (start >= passedStart) {
+        passed = index;
+        passedStart = start;
+      }
+      const end = Number(bookmark.effective_end_offset_seconds);
+      if (bookmark.kind === "range" && Number.isFinite(end) && now <= end && start >= containingStart) {
+        containing = index;
+        containingStart = start;
+      }
     });
-    return current;
+    return containing >= 0 ? containing : passed;
   };
   const shouldHandleBookmarkShortcut = event => {
     if (
@@ -90,11 +103,7 @@
       headers: { "Content-Type": "application/json", ...(options.headers || {}) },
     });
     let payload = {};
-    try {
-      payload = await response.json();
-    } catch (_) {
-      payload = {};
-    }
+    try { payload = await response.json(); } catch (_) { payload = {}; }
     if (!response.ok) {
       const detail = Array.isArray(payload.detail)
         ? payload.detail.map(item => item.msg).join(" · ")
@@ -129,6 +138,9 @@
   const updateShiftControls = root => {
     if (root.dataset.bookmarkScope !== "media" || !root.bookmarkCollection) return;
     const shift = normalizeBookmarkShift(root.bookmarkCollection.shift_seconds);
+    const channelDefault = normalizeBookmarkShift(
+      root.bookmarkCollection.channel_default_shift_seconds
+    );
     const output = root.querySelector("[data-bookmark-shift-value]");
     const earlier = root.querySelector('[data-bookmark-shift-action="earlier"]');
     const later = root.querySelector('[data-bookmark-shift-action="later"]');
@@ -136,7 +148,7 @@
     if (output) output.textContent = formatBookmarkShift(shift);
     if (earlier) earlier.disabled = shift <= SHIFT_MIN;
     if (later) later.disabled = shift >= SHIFT_MAX;
-    if (reset) reset.disabled = shift === 0;
+    if (reset) reset.disabled = shift === channelDefault;
   };
 
   const updateHighlight = root => {
@@ -148,6 +160,19 @@
     root.querySelectorAll(".bookmark-row").forEach((row, index) => {
       row.classList.toggle("current", index === current);
     });
+  };
+
+  const appendTimeInput = (form, name, value, label, required = true) => {
+    const input = document.createElement("input");
+    input.name = name;
+    input.className = "bookmark-time-input";
+    input.value = value == null ? "" : formatBookmarkTime(value);
+    input.placeholder = required ? "MM:SS" : "끝 미설정";
+    input.inputMode = "numeric";
+    input.setAttribute("aria-label", label);
+    input.required = required;
+    form.append(input);
+    return input;
   };
 
   const renderBookmarks = (root, collection) => {
@@ -173,23 +198,31 @@
     }
 
     bookmarks.forEach(bookmark => {
+      const isRange = bookmark.kind === "range";
       const row = document.createElement("article");
       row.className = "bookmark-row";
       row.dataset.bookmarkId = String(bookmark.id);
 
       const heading = document.createElement("div");
       heading.className = "bookmark-row-heading";
+      const timeLabel = isRange
+        ? `${formatBookmarkTime(bookmark.effective_offset_seconds)} – ${bookmark.complete ? formatBookmarkTime(bookmark.effective_end_offset_seconds) : "끝 미설정"}`
+        : formatBookmarkTime(bookmark.effective_offset_seconds);
       if (root.dataset.bookmarkScope === "media") {
-        const seek = button(formatBookmarkTime(bookmark.effective_offset_seconds), "bookmark-seek");
+        const seek = button(timeLabel, "bookmark-seek");
         seek.dataset.bookmarkSeek = String(bookmark.id);
         seek.setAttribute("aria-label", `${formatBookmarkTime(bookmark.effective_offset_seconds)} 위치부터 재생`);
         heading.append(seek);
       } else {
         const time = document.createElement("strong");
         time.className = "bookmark-live-time";
-        time.textContent = formatBookmarkTime(bookmark.effective_offset_seconds);
+        time.textContent = timeLabel;
         heading.append(time);
       }
+      const kindBadge = document.createElement("span");
+      kindBadge.className = "status-badge";
+      kindBadge.textContent = isRange ? (bookmark.complete ? "구간" : "구간 · 끝 미설정") : "시점";
+      heading.append(kindBadge);
       if (!bookmark.resolved && root.dataset.bookmarkScope === "recording") {
         const pending = document.createElement("span");
         pending.className = "status-badge";
@@ -199,16 +232,19 @@
       row.append(heading);
 
       const form = document.createElement("form");
-      form.className = "bookmark-edit-form";
+      form.className = `bookmark-edit-form ${isRange ? "bookmark-range-edit" : ""}`;
       form.dataset.bookmarkEdit = String(bookmark.id);
-
-      const timeInput = document.createElement("input");
-      timeInput.name = "bookmark_time";
-      timeInput.className = "bookmark-time-input";
-      timeInput.value = formatBookmarkTime(bookmark.effective_offset_seconds);
-      timeInput.inputMode = "numeric";
-      timeInput.setAttribute("aria-label", "북마크 시간");
-      timeInput.required = true;
+      form.dataset.bookmarkKind = bookmark.kind;
+      appendTimeInput(form, "bookmark_time", bookmark.effective_offset_seconds, "북마크 시작 시간");
+      if (isRange) {
+        appendTimeInput(
+          form,
+          "bookmark_end_time",
+          bookmark.complete ? bookmark.effective_end_offset_seconds : null,
+          "북마크 끝 시간",
+          false
+        );
+      }
 
       const contentInput = document.createElement("input");
       contentInput.name = "bookmark_content";
@@ -217,19 +253,33 @@
       contentInput.maxLength = 500;
       contentInput.placeholder = "메모 (선택)";
       contentInput.setAttribute("aria-label", "북마크 내용");
+      form.append(contentInput);
 
-      const current = button(
-        root.dataset.bookmarkScope === "media" ? "현재 재생 위치" : "현재 방송 시점",
+      const currentStart = button(
+        root.dataset.bookmarkScope === "media" ? "현재 시작" : "방송 시작",
         "bookmark-current"
       );
-      current.dataset.bookmarkCurrent = String(bookmark.id);
+      currentStart.dataset.bookmarkCurrent = String(bookmark.id);
+      currentStart.dataset.bookmarkBoundary = "start";
+      form.append(currentStart);
+      if (isRange) {
+        const currentEnd = button(
+          root.dataset.bookmarkScope === "media" ? "현재 끝" : "방송 끝",
+          "bookmark-current"
+        );
+        currentEnd.dataset.bookmarkCurrent = String(bookmark.id);
+        currentEnd.dataset.bookmarkBoundary = "end";
+        form.append(currentEnd);
+      }
+      const convert = button(isRange ? "시점으로" : "구간으로", "bookmark-convert");
+      convert.dataset.bookmarkConvert = String(bookmark.id);
+      convert.dataset.bookmarkTargetKind = isRange ? "point" : "range";
       const save = document.createElement("button");
       save.type = "submit";
       save.textContent = "저장";
       const remove = button("삭제", "danger bookmark-delete");
       remove.dataset.bookmarkDelete = String(bookmark.id);
-
-      form.append(timeInput, contentInput, current, save, remove);
+      form.append(convert, save, remove);
       row.append(form);
       list.append(row);
     });
@@ -293,7 +343,8 @@
       event.preventDefault();
       if (addForm) {
         const contentInput = addForm.querySelector('[name="bookmark_content"]');
-        const payload = { content: contentInput?.value || "" };
+        const kind = event.submitter?.dataset.bookmarkKind || "point";
+        const payload = { content: contentInput?.value || "", kind };
         if (root.dataset.bookmarkScope === "media") {
           const player = document.getElementById("player");
           if (!player || player.readyState < 1) {
@@ -303,34 +354,45 @@
           payload.display_offset_seconds = player.currentTime;
         }
         const saved = await runMutation(
-          root,
-          endpointFor(root),
-          "POST",
-          payload,
-          "북마크를 저장했습니다."
+          root, endpointFor(root), "POST", payload,
+          kind === "range" ? "구간 시작을 저장했습니다." : "북마크를 저장했습니다."
         );
         if (saved && contentInput) contentInput.value = "";
         return;
       }
 
       const id = editForm.dataset.bookmarkEdit;
+      const kind = editForm.dataset.bookmarkKind || "point";
       const timeInput = editForm.querySelector('[name="bookmark_time"]');
+      const endInput = editForm.querySelector('[name="bookmark_end_time"]');
       const contentInput = editForm.querySelector('[name="bookmark_content"]');
       const parsedTime = parseBookmarkTime(timeInput?.value);
       if (parsedTime == null) {
-        setStatus(root, "시간은 MM:SS 또는 H:MM:SS 형식으로 입력해 주세요.", true, 4000);
+        setStatus(root, "시작 시간은 MM:SS 또는 H:MM:SS 형식으로 입력해 주세요.", true, 4000);
         timeInput?.focus();
         return;
       }
-      await runMutation(root, `/bookmarks/${id}`, "PATCH", {
+      const payload = {
         display_offset_seconds: parsedTime,
         content: contentInput?.value || "",
-      }, "북마크를 수정했습니다.");
+      };
+      if (kind === "range") {
+        const rawEnd = String(endInput?.value || "").trim();
+        const parsedEnd = rawEnd ? parseBookmarkTime(rawEnd) : null;
+        if (rawEnd && parsedEnd == null) {
+          setStatus(root, "끝 시간은 MM:SS 또는 H:MM:SS 형식으로 입력해 주세요.", true, 4000);
+          endInput?.focus();
+          return;
+        }
+        payload.end_display_offset_seconds = parsedEnd;
+      }
+      await runMutation(root, `/bookmarks/${id}`, "PATCH", payload, "북마크를 수정했습니다.");
     });
 
     root.addEventListener("click", async event => {
       const seek = event.target.closest("[data-bookmark-seek]");
       const current = event.target.closest("[data-bookmark-current]");
+      const convert = event.target.closest("[data-bookmark-convert]");
       const remove = event.target.closest("[data-bookmark-delete]");
       const shiftButton = event.target.closest("[data-bookmark-shift-action]");
 
@@ -339,17 +401,15 @@
         const player = document.getElementById("player");
         if (!bookmark || !player) return;
         player.currentTime = Number(bookmark.effective_offset_seconds) || 0;
-        try {
-          await player.play();
-        } catch (_) {
-          setStatus(root, "해당 위치로 이동했습니다. 재생 버튼을 눌러 주세요.", false, 3000);
-        }
+        try { await player.play(); }
+        catch (_) { setStatus(root, "해당 위치로 이동했습니다. 재생 버튼을 눌러 주세요.", false, 3000); }
         return;
       }
 
       if (current) {
         const form = current.closest("[data-bookmark-edit]");
         const content = form?.querySelector('[name="bookmark_content"]')?.value || "";
+        const boundary = current.dataset.bookmarkBoundary || "start";
         const payload = { content };
         if (root.dataset.bookmarkScope === "media") {
           const player = document.getElementById("player");
@@ -357,47 +417,41 @@
             setStatus(root, "영상 프레임이 준비되지 않았습니다.", true, 4000);
             return;
           }
-          payload.display_offset_seconds = player.currentTime;
+          payload[boundary === "end" ? "end_display_offset_seconds" : "display_offset_seconds"] = player.currentTime;
         } else {
-          payload.use_current_live_time = true;
+          payload[boundary === "end" ? "use_current_live_end_time" : "use_current_live_time"] = true;
         }
         await runMutation(
-          root,
-          `/bookmarks/${current.dataset.bookmarkCurrent}`,
-          "PATCH",
-          payload,
-          root.dataset.bookmarkScope === "media"
-            ? "현재 재생 위치로 변경했습니다."
-            : "현재 방송 시점으로 변경했습니다."
+          root, `/bookmarks/${current.dataset.bookmarkCurrent}`, "PATCH", payload,
+          boundary === "end" ? "구간 끝을 현재 시점으로 변경했습니다." : "시작을 현재 시점으로 변경했습니다."
+        );
+        return;
+      }
+
+      if (convert) {
+        const targetKind = convert.dataset.bookmarkTargetKind;
+        if (targetKind === "point" && !window.confirm("구간 끝 정보를 지우고 시점 북마크로 바꿀까요?")) return;
+        await runMutation(
+          root, `/bookmarks/${convert.dataset.bookmarkConvert}`, "PATCH",
+          { kind: targetKind },
+          targetKind === "range" ? "끝 미설정 구간으로 변경했습니다." : "시점 북마크로 변경했습니다."
         );
         return;
       }
 
       if (remove) {
         if (!window.confirm("이 북마크를 삭제할까요? 삭제 후 복구할 수 없습니다.")) return;
-        await runMutation(
-          root,
-          `/bookmarks/${remove.dataset.bookmarkDelete}`,
-          "DELETE",
-          undefined,
-          "북마크를 삭제했습니다."
-        );
+        await runMutation(root, `/bookmarks/${remove.dataset.bookmarkDelete}`, "DELETE", undefined, "북마크를 삭제했습니다.");
         return;
       }
 
       if (shiftButton && root.bookmarkCollection) {
         const currentShift = normalizeBookmarkShift(root.bookmarkCollection.shift_seconds);
         const action = shiftButton.dataset.bookmarkShiftAction;
-        const shift = action === "reset"
-          ? 0
-          : currentShift + (action === "earlier" ? -SHIFT_STEP : SHIFT_STEP);
-        await runMutation(
-          root,
-          `/media/${root.dataset.mediaId}/bookmark-shift`,
-          "PUT",
-          { shift_seconds: shift },
-          "북마크 전체 시간을 보정했습니다."
-        );
+        const payload = action === "reset"
+          ? { reset_to_channel_default: true }
+          : { shift_seconds: currentShift + (action === "earlier" ? -SHIFT_STEP : SHIFT_STEP) };
+        await runMutation(root, `/media/${root.dataset.mediaId}/bookmark-shift`, "PUT", payload, "북마크 전체 시간을 보정했습니다.");
       }
     });
 
@@ -408,7 +462,6 @@
     if (container.matches?.("[data-bookmark-root]")) initializeRoot(container);
     container.querySelectorAll?.("[data-bookmark-root]").forEach(initializeRoot);
   };
-
   initializeAll(document);
   document.body.addEventListener("htmx:afterSwap", event => initializeAll(event.target));
 
@@ -421,10 +474,8 @@
       if (!shouldHandleBookmarkShortcut(event) || player.readyState < 1) return;
       event.preventDefault();
       await runMutation(
-        mediaRoot,
-        endpointFor(mediaRoot),
-        "POST",
-        { display_offset_seconds: player.currentTime, content: "" },
+        mediaRoot, endpointFor(mediaRoot), "POST",
+        { display_offset_seconds: player.currentTime, content: "", kind: "point" },
         "현재 위치에 북마크를 저장했습니다."
       );
     });

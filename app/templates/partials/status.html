@@ -32,7 +32,8 @@
               placeholder="북마크 메모 (선택)"
               aria-label="생방송 북마크 내용"
             >
-            <button type="submit">현재 시점 체크</button>
+            <button type="submit" data-bookmark-kind="point">현재 시점 체크</button>
+            <button type="submit" data-bookmark-kind="range">구간 시작</button>
           </form>
           <output data-bookmark-status role="status" aria-live="polite"></output>
           <details class="live-bookmark-details">

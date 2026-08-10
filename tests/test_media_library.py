@@ -104,7 +104,7 @@ def test_database_backs_up_legacy_schema(tmp_path):
 
     Database(path)
 
-    backups = list((tmp_path / "backups").glob("legacy-pre-v5-*.sqlite3"))
+    backups = list((tmp_path / "backups").glob("legacy-pre-v6-*.sqlite3"))
     assert len(backups) == 1
 
 
