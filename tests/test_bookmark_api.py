@@ -44,7 +44,7 @@ def test_live_bookmark_api_and_dashboard_controls(tmp_path, monkeypatch):
     assert "북마크 기본" in dashboard.text
     assert "북마크 메모 (선택)" in dashboard.text
     assert "hx-preserve" in dashboard.text
-    assert '/static/bookmarks.js?v=0.4.5' in dashboard.text
+    assert '/static/bookmarks.js?v=0.4.6' in dashboard.text
 
     defaults = client.post(
         "/channels/streamer-id/sync-defaults",
@@ -155,7 +155,7 @@ def test_media_bookmark_api_shift_and_player_controls(tmp_path, monkeypatch):
     assert 'data-seek-seconds="-10"' in player.text
     assert 'data-seek-seconds="10"' in player.text
     assert "북마크 전체 시간 보정" in player.text
-    assert '/static/bookmarks.js?v=0.4.5' in player.text
+    assert '/static/bookmarks.js?v=0.4.6' in player.text
 
     attached = client.get(f"/media/{media_id}/bookmarks")
     assert attached.status_code == 200

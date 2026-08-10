@@ -51,8 +51,8 @@ def test_retention_and_clip_forms_render_and_update(tmp_path, monkeypatch):
     assert "스크린샷 저장 (S)" in player.text
     assert 'id="capture-status"' in player.text
     assert 'aria-live="polite"' in player.text
-    assert '/static/styles.css?v=0.4.5' in player.text
-    assert '/static/player.js?v=0.4.5' in player.text
+    assert '/static/styles.css?v=0.4.6' in player.text
+    assert '/static/player.js?v=0.4.6' in player.text
     assert 'id="chat-delay-earlier"' in player.text
     assert 'id="chat-delay-later"' in player.text
     assert 'id="chat-delay-reset"' in player.text

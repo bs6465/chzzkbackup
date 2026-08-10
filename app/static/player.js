@@ -61,6 +61,21 @@
     const target = Math.max(0, (Number.isFinite(current) ? current : 0) + (Number.isFinite(change) ? change : 0));
     return Number.isFinite(maximum) && maximum >= 0 ? Math.min(maximum, target) : target;
   };
+  const chatScrollTarget = (
+    scrollTop,
+    listTop,
+    listHeight,
+    rowTop,
+    rowHeight,
+    scrollHeight
+  ) => {
+    const viewportHeight = Math.max(0, Number(listHeight) || 0);
+    const maximum = Math.max(0, (Number(scrollHeight) || 0) - viewportHeight);
+    const target = (Number(scrollTop) || 0)
+      + ((Number(rowTop) || 0) - (Number(listTop) || 0))
+      - (viewportHeight - Math.max(0, Number(rowHeight) || 0)) / 2;
+    return Math.min(maximum, Math.max(0, target));
+  };
   const shouldHandleSeekShortcut = event => {
     if (
       !["ArrowLeft", "ArrowRight"].includes(String(event.key || "")) ||
@@ -81,6 +96,7 @@
       formatTimelineTime,
       normalizeChatDelay,
       screenshotFilename,
+      chatScrollTarget,
       clampedSeekTime,
       seekStepForEvent,
       shouldHandleSeekShortcut,
@@ -133,8 +149,17 @@
     if (element) {
       element.classList.add("current");
       if (autoScroll.checked) {
-        const top = element.offsetTop - (list.clientHeight - element.offsetHeight) / 2;
-        list.scrollTo({ top: Math.max(0, top), behavior: "auto" });
+        const listRect = list.getBoundingClientRect();
+        const rowRect = element.getBoundingClientRect();
+        const top = chatScrollTarget(
+          list.scrollTop,
+          listRect.top,
+          list.clientHeight,
+          rowRect.top,
+          rowRect.height,
+          list.scrollHeight
+        );
+        list.scrollTo({ top, behavior: "auto" });
       }
     }
   };
