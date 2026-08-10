@@ -3,11 +3,12 @@
     <h2>녹화 중</h2>
     <div class="list">
       {% for session in active_sessions %}
-      <div class="row">
-        <div>
+      <div class="row live-recording-row">
+        <div class="live-recording-info">
           <strong>{{ session.platform|platform_label }} · {{ session.channel_name }}</strong>
           <span>{{ session.live_title }}</span>
           <span>{{ session.started_at }}</span>
+          {% if session.status == 'retrying' %}<span class="error">녹화 재연결 중</span>{% endif %}
         </div>
         <form method="post" action="/recordings/{{ session.id }}/rename" class="rename">
           <input name="title" value="{{ session.live_title }}">
@@ -16,6 +17,31 @@
         <form method="post" action="/recordings/{{ session.id }}/stop">
           <button class="danger" type="submit">중지</button>
         </form>
+        <section
+          id="live-bookmark-root-{{ session.id }}"
+          class="live-bookmark-panel"
+          data-bookmark-root
+          data-bookmark-scope="recording"
+          data-session-id="{{ session.id }}"
+          hx-preserve
+        >
+          <form class="live-bookmark-add" data-bookmark-add>
+            <input
+              name="bookmark_content"
+              maxlength="500"
+              placeholder="북마크 메모 (선택)"
+              aria-label="생방송 북마크 내용"
+            >
+            <button type="submit">현재 시점 체크</button>
+          </form>
+          <output data-bookmark-status role="status" aria-live="polite"></output>
+          <details class="live-bookmark-details">
+            <summary>북마크 <span data-bookmark-count>0</span>개</summary>
+            <div class="bookmark-list" data-bookmark-list>
+              <p class="muted">북마크를 불러오는 중…</p>
+            </div>
+          </details>
+        </section>
       </div>
       {% else %}
       <p class="muted">현재 녹화 중인 방송이 없습니다.</p>

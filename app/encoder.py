@@ -8,6 +8,7 @@ from collections import deque
 from pathlib import Path
 
 from . import config
+from .bookmarks import BookmarkService
 from .db import db
 from .logger import logger
 
@@ -270,7 +271,7 @@ class EncodeWorker:
                 db.update_encode_job(job_id, "completed")
                 db.update_session_status(session_id, "completed", final_path=final_path)
                 session = db.get_session(session_id) or {}
-                db.upsert_media_item(
+                media_id = db.upsert_media_item(
                     video_path=final_path,
                     session_id=session_id,
                     platform=str(session.get("platform") or "chzzk"),
@@ -282,6 +283,7 @@ class EncodeWorker:
                     duration_seconds=duration_seconds,
                     size_bytes=final_path.stat().st_size,
                 )
+                BookmarkService(db).attach_session_bookmarks(media_id)
                 logger.info("Encoding completed: %s", final_path)
             except Exception as exc:
                 retry_count = int(job.get("retry_count") or 0)

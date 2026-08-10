@@ -7,6 +7,39 @@
       <button type="button" id="capture-frame" data-media-title="{{ item.title }}" disabled>스크린샷 저장 (S)</button>
       <output id="capture-status" class="muted" role="status" aria-live="polite">영상 준비 중…</output>
     </div>
+    <section
+      class="player-tools bookmark-panel"
+      id="bookmark-controls"
+      data-bookmark-root
+      data-bookmark-scope="media"
+      data-media-id="{{ item.id }}"
+    >
+      <div class="bookmark-heading">
+        <div>
+          <h2>북마크</h2>
+          <p class="muted">현재 위치를 여러 번 저장하고 `B` 키로 빠르게 체크할 수 있습니다.</p>
+        </div>
+        <div class="bookmark-shift-controls" role="group" aria-label="북마크 전체 시간 보정">
+          <output data-bookmark-shift-value aria-live="polite">+0.0초</output>
+          <button type="button" data-bookmark-shift-action="earlier" aria-label="모든 북마크를 0.5초 앞으로 이동">−0.5초</button>
+          <button type="button" data-bookmark-shift-action="later" aria-label="모든 북마크를 0.5초 뒤로 이동">+0.5초</button>
+          <button type="button" data-bookmark-shift-action="reset" aria-label="북마크 전체 시간 보정 초기화" disabled>초기화</button>
+        </div>
+      </div>
+      <form class="bookmark-add-form" data-bookmark-add>
+        <input
+          name="bookmark_content"
+          maxlength="500"
+          placeholder="북마크 메모 (선택)"
+          aria-label="북마크 내용"
+        >
+        <button type="submit">현재 위치 북마크</button>
+      </form>
+      <output data-bookmark-status role="status" aria-live="polite"></output>
+      <div class="bookmark-list" data-bookmark-list>
+        <p class="muted">북마크를 불러오는 중…</p>
+      </div>
+    </section>
     <form class="inline-form rename-player" method="post" action="/media/{{ item.id }}/rename"><input name="title" value="{{ item.title }}" required><button>제목·파일명 변경</button></form>
     <section class="player-tools">
       <h2>저장 정책</h2>
@@ -59,5 +92,5 @@
     <div id="chat-types" class="type-filters"></div><div id="chat-list" class="chat-timeline"><p class="muted">채팅을 불러오는 중…</p></div>
   </aside>
 </section>
-<script>window.CHZZK_MEDIA_ID={{ item.id }};</script><script src="/static/player.js?v={{ version }}"></script>
+<script>window.CHZZK_MEDIA_ID={{ item.id }};</script><script src="/static/player.js?v={{ version }}"></script><script src="/static/bookmarks.js?v={{ version }}"></script>
 {% endblock %}

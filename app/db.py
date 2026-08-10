@@ -12,7 +12,7 @@ from typing import Any
 from . import config
 from .utils import ensure_storage_dirs, recording_name, sanitize_cookie_value, sanitize_name, unique_path, utc_now_iso
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Database:
@@ -213,8 +213,26 @@ class Database:
                   FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE SET NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS video_bookmarks (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  session_id INTEGER,
+                  media_id INTEGER,
+                  marked_at TEXT,
+                  offset_seconds REAL,
+                  content TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  CHECK(session_id IS NOT NULL OR media_id IS NOT NULL),
+                  FOREIGN KEY(session_id) REFERENCES recording_sessions(id) ON DELETE CASCADE,
+                  FOREIGN KEY(media_id) REFERENCES media_items(id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_clip_jobs_status ON clip_jobs(status, id);
                 CREATE INDEX IF NOT EXISTS idx_clip_jobs_media ON clip_jobs(media_id, id DESC);
+                CREATE INDEX IF NOT EXISTS idx_video_bookmarks_session
+                  ON video_bookmarks(session_id, id);
+                CREATE INDEX IF NOT EXISTS idx_video_bookmarks_media
+                  ON video_bookmarks(media_id, id);
                 """
             )
             self._ensure_columns(
@@ -246,6 +264,7 @@ class Database:
                     "chat_csv_temp_path": "TEXT",
                     "retry_count": "INTEGER DEFAULT 0",
                     "next_retry_at": "TEXT",
+                    "current_segment_started_at": "TEXT",
                 },
             )
             self._ensure_columns(
@@ -254,6 +273,7 @@ class Database:
                     "retention_policy_key": "TEXT",
                     "retention_override": "TEXT NOT NULL DEFAULT 'inherit'",
                     "retention_expires_at": "TEXT",
+                    "bookmark_shift_seconds": "REAL NOT NULL DEFAULT 0",
                 },
             )
             self._ensure_columns(
@@ -725,7 +745,7 @@ class Database:
         self.execute(
             """
             UPDATE recording_sessions
-            SET ended_at = ?, status = ?, source_path = ?
+            SET ended_at = ?, status = ?, source_path = ?, current_segment_started_at = NULL
             WHERE id = ?
             """,
             (utc_now_iso(), status, str(source_path) if source_path else None, session_id),
@@ -742,10 +762,12 @@ class Database:
         self.execute(
             """
             UPDATE recording_sessions
-            SET status = ?, final_path = COALESCE(?, final_path), error = COALESCE(?, error)
+            SET status = ?, final_path = COALESCE(?, final_path), error = COALESCE(?, error),
+                current_segment_started_at = CASE
+                  WHEN ? = 'recording' THEN current_segment_started_at ELSE NULL END
             WHERE id = ?
             """,
-            (status, str(final_path) if final_path else None, error, session_id),
+            (status, str(final_path) if final_path else None, error, status, session_id),
         )
 
     def add_encode_job(self, session_id: int, source_path: Path, final_path: Path) -> int:
@@ -804,7 +826,8 @@ class Database:
         self.execute(
             """
             UPDATE recording_sessions
-            SET status = 'retrying', retry_count = ?, next_retry_at = ?, error = ?
+            SET status = 'retrying', retry_count = ?, next_retry_at = ?, error = ?,
+                current_segment_started_at = NULL
             WHERE id = ?
             """,
             (retry_count, next_retry.isoformat(), error, session_id),
@@ -1081,7 +1104,9 @@ class Database:
 
     def recover_interrupted_sessions(self) -> dict[str, int]:
         recovered = {"queued": 0, "failed": 0}
-        rows = self.query_all("SELECT * FROM recording_sessions WHERE status = 'recording'")
+        rows = self.query_all(
+            "SELECT * FROM recording_sessions WHERE status IN ('recording', 'retrying')"
+        )
         now = utc_now_iso()
         for row in rows:
             session_id = int(row["id"])
@@ -1136,7 +1161,8 @@ class Database:
                 self.execute(
                     """
                     UPDATE recording_sessions
-                    SET status = 'failed', ended_at = ?, error = ?
+                    SET status = 'failed', ended_at = ?, error = ?,
+                        current_segment_started_at = NULL
                     WHERE id = ?
                     """,
                     (now, "Recording was interrupted by application restart", session_id),
@@ -1177,7 +1203,11 @@ class Database:
 
     def active_sessions(self) -> list[dict[str, Any]]:
         return self.query_all(
-            "SELECT * FROM recording_sessions WHERE status = 'recording' ORDER BY started_at DESC"
+            """
+            SELECT * FROM recording_sessions
+            WHERE status IN ('recording', 'retrying')
+            ORDER BY started_at DESC
+            """
         )
 
     def recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:

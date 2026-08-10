@@ -288,9 +288,16 @@ class RecorderSupervisor:
                 segment_csv = config.TEMP_DIR / f"{segment_base}.chat.csv.part"
                 db.execute(
                     """UPDATE recording_sessions
-                       SET temp_path=?, chat_jsonl_temp_path=?, chat_csv_temp_path=?, status='recording'
+                       SET temp_path=?, chat_jsonl_temp_path=?, chat_csv_temp_path=?,
+                           status='recording', current_segment_started_at=?
                        WHERE id=?""",
-                    (str(segment_temp), str(segment_jsonl), str(segment_csv), session_id),
+                    (
+                        str(segment_temp),
+                        str(segment_jsonl),
+                        str(segment_csv),
+                        kst_iso(segment_started),
+                        session_id,
+                    ),
                 )
                 source, error = await self._capture_segment(
                     active, channel, current_live, tokens, twitcasting_token,
@@ -303,6 +310,10 @@ class RecorderSupervisor:
                     session_id, sequence, source, final_segment_jsonl, final_segment_csv,
                     kst_iso(segment_started), duration_seconds=duration,
                     has_video=bool(source), error=error,
+                )
+                db.execute(
+                    "UPDATE recording_sessions SET current_segment_started_at=NULL WHERE id=?",
+                    (session_id,),
                 )
                 if source:
                     retry_count = 0
@@ -344,6 +355,10 @@ class RecorderSupervisor:
             logger.exception("Recording failed for %s: %s", channel_name, exc)
         finally:
             stop_event.set()
+            db.execute(
+                "UPDATE recording_sessions SET current_segment_started_at=NULL WHERE id=?",
+                (session_id,),
+            )
             await terminate_process(active.ffmpeg_process, "ffmpeg", warn_on_kill=False)
             await terminate_process(active.stream_process, "streamlink", warn_on_kill=False)
             self.active.pop(session_id, None)

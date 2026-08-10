@@ -27,7 +27,7 @@ def add_media(
     )
 
 
-def test_schema_v4_backfills_unlimited_registered_and_discovered_policies(tmp_path):
+def test_current_schema_backfills_unlimited_registered_and_discovered_policies(tmp_path):
     database = Database(tmp_path / "catalog.sqlite3")
     database.upsert_channel("stable-id", "Streamer", platform="chzzk")
     registered_id = database.upsert_media_item(
@@ -43,7 +43,7 @@ def test_schema_v4_backfills_unlimited_registered_and_discovered_policies(tmp_pa
         started_at="2026-06-01T00:00:00+09:00",
     )
 
-    assert database.query_one("PRAGMA user_version")["user_version"] == 4
+    assert database.query_one("PRAGMA user_version")["user_version"] == 5
     registered = database.get_media_item(registered_id)
     discovered = database.get_media_item(discovered_id)
     assert registered["retention_policy_key"] == "registered:chzzk:stable-id"

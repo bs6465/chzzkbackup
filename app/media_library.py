@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config
+from .bookmarks import BookmarkService
 from .db import db
 from .logger import logger
 from .utils import KST, recording_name, sanitize_name, utc_now_iso
@@ -171,7 +172,7 @@ class MediaIndexer:
                 digest = hashlib.sha256(str(resolved).encode()).hexdigest()[:24]
                 thumbnail = config.APP_DATA_DIR / "thumbnails" / f"{digest}.webp"
                 platform = str(session.get("platform")) if session and session.get("platform") else ("twitcasting" if "트윗캐스트" in resolved.parts else "chzzk")
-                db.upsert_media_item(
+                media_id = db.upsert_media_item(
                     video_path=resolved, channel_name=metadata["channel_name"],
                     title=metadata["title"], started_at=metadata["started_at"],
                     platform=platform, session_id=int(session["id"]) if session else None,
@@ -179,6 +180,8 @@ class MediaIndexer:
                     thumbnail_path=thumbnail if thumbnail.exists() else None,
                     duration_seconds=duration, size_bytes=stat.st_size,
                 )
+                if session:
+                    BookmarkService(db).attach_session_bookmarks(media_id)
                 if not thumbnail.exists() and duration is not None:
                     try:
                         if await create_thumbnail(resolved, thumbnail, duration):

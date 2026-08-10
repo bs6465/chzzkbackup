@@ -10,8 +10,15 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 
 from . import __version__, config
+from .bookmarks import (
+    BookmarkNotFoundError,
+    BookmarkService,
+    BookmarkValidationError,
+    InactiveRecordingError,
+)
 from .chzzk_api import test_tokens as test_chzzk_tokens
 from .clipper import InsufficientClipStorageError, clip_worker
 from .db import db
@@ -45,6 +52,25 @@ encoder = EncodeWorker()
 maintenance = MaintenanceWorker()
 media_indexer = MediaIndexer()
 CLIP_TIME_RE = re.compile(r"^(?P<hours>\d+):(?P<minutes>[0-5]\d):(?P<seconds>[0-5]\d)$")
+
+
+class LiveBookmarkCreate(BaseModel):
+    content: str = ""
+
+
+class MediaBookmarkCreate(BaseModel):
+    display_offset_seconds: float
+    content: str = ""
+
+
+class BookmarkUpdate(BaseModel):
+    display_offset_seconds: float | None = None
+    content: str | None = None
+    use_current_live_time: bool = False
+
+
+class BookmarkShiftUpdate(BaseModel):
+    shift_seconds: float
 
 
 @asynccontextmanager
@@ -272,6 +298,73 @@ async def media_thumbnail(media_id: int):
 async def media_chat(media_id: int):
     item = available_media_or_404(media_id)
     return JSONResponse(load_chat_rows(item))
+
+
+def bookmark_result(operation):
+    try:
+        return operation()
+    except BookmarkNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
+    except BookmarkValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except InactiveRecordingError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/recordings/{session_id}/bookmarks")
+async def recording_bookmarks(session_id: int):
+    return bookmark_result(lambda: BookmarkService(db).live_collection(session_id))
+
+
+@app.post("/recordings/{session_id}/bookmarks", status_code=201)
+async def create_recording_bookmark(session_id: int, payload: LiveBookmarkCreate):
+    return bookmark_result(
+        lambda: BookmarkService(db).create_live_bookmark(session_id, payload.content)
+    )
+
+
+@app.get("/media/{media_id}/bookmarks")
+async def media_bookmarks(media_id: int):
+    available_media_or_404(media_id)
+    return bookmark_result(lambda: BookmarkService(db).media_collection(media_id))
+
+
+@app.post("/media/{media_id}/bookmarks", status_code=201)
+async def create_media_bookmark(media_id: int, payload: MediaBookmarkCreate):
+    available_media_or_404(media_id)
+    return bookmark_result(
+        lambda: BookmarkService(db).create_media_bookmark(
+            media_id, payload.display_offset_seconds, payload.content
+        )
+    )
+
+
+@app.patch("/bookmarks/{bookmark_id}")
+async def update_bookmark(bookmark_id: int, payload: BookmarkUpdate):
+    fields = payload.model_fields_set
+    return bookmark_result(
+        lambda: BookmarkService(db).update_bookmark(
+            bookmark_id,
+            content=payload.content,
+            content_provided="content" in fields,
+            display_offset_seconds=payload.display_offset_seconds,
+            offset_provided="display_offset_seconds" in fields,
+            use_current_live_time=payload.use_current_live_time,
+        )
+    )
+
+
+@app.delete("/bookmarks/{bookmark_id}")
+async def delete_bookmark(bookmark_id: int):
+    return bookmark_result(lambda: BookmarkService(db).delete_bookmark(bookmark_id))
+
+
+@app.put("/media/{media_id}/bookmark-shift")
+async def update_media_bookmark_shift(media_id: int, payload: BookmarkShiftUpdate):
+    available_media_or_404(media_id)
+    return bookmark_result(
+        lambda: BookmarkService(db).set_media_shift(media_id, payload.shift_seconds)
+    )
 
 
 @app.post("/media/{media_id}/rename")
